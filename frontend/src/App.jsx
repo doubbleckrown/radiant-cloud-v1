@@ -38,8 +38,8 @@ export default function App() {
 
   return (
     <div
-      className="relative w-full h-screen bg-void overflow-hidden select-none"
-      style={{ fontFamily: "'DM Sans', sans-serif" }}
+      className="relative w-full h-screen bg-void select-none"
+      style={{ fontFamily: "'DM Sans', sans-serif", overflow: "clip" }}
     >
       {/* Scanline overlay — subtle OLED texture */}
       <div

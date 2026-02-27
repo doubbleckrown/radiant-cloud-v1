@@ -70,8 +70,19 @@ OANDA_ACCOUNT   = os.getenv("OANDA_ACCOUNT_ID", "")
 OANDA_BASE      = os.getenv("OANDA_BASE_URL", "https://api-fxpractice.oanda.com")
 OANDA_STREAM    = os.getenv("OANDA_STREAM_URL", "https://stream-fxpractice.oanda.com")
 
-INSTRUMENTS     = ["EUR_USD", "GBP_USD", "USD_JPY", "XAU_USD", "NAS100_USD"]
-GRANULARITIES   = ["M5", "M15", "H1"]
+INSTRUMENTS = [
+    # ── Forex majors ──────────────────────────────────────
+    "EUR_USD", "GBP_USD", "USD_JPY", "AUD_USD",
+    "NZD_USD", "USD_CAD", "USD_CHF",
+    # ── Metals ────────────────────────────────────────────
+    "XAU_USD",
+    # ── Indices ───────────────────────────────────────────
+    "NAS100_USD", "US30_USD", "SPX500_USD",
+    "GER30_EUR",  "UK100_GBP", "J225_USD",
+    # ── Crypto ────────────────────────────────────────────
+    "BTC_USD",
+]
+GRANULARITIES = ["M5", "M15", "H1"]
 
 logger = logging.getLogger("fx-radiant")
 logging.basicConfig(level=logging.INFO)
@@ -742,17 +753,56 @@ async def websocket_endpoint(ws: WebSocket, token: str = ""):
     _ws_clients.add(ws)
     logger.info("WS client connected. Total: %d", len(_ws_clients))
 
-    # Send initial snapshot
+    # Send initial snapshot — prices + last 5 signals per instrument
     snapshot = {
-        "type":   "SNAPSHOT",
-        "prices": _latest_prices,
+        "type":    "SNAPSHOT",
+        "prices":  _latest_prices,
         "signals": {ins: _signal_history[ins][:5] for ins in INSTRUMENTS},
     }
     await ws.send_text(json.dumps(snapshot))
 
     try:
         while True:
-            await ws.receive_text()   # keep-alive / ping from client
+            raw = await ws.receive_text()
+
+            # Parse client messages — anything that isn't valid JSON (e.g. the
+            # keep-alive "ping" string) is silently ignored.
+            try:
+                msg = json.loads(raw)
+            except (json.JSONDecodeError, TypeError):
+                continue
+
+            msg_type = msg.get("type")
+
+            # ── SUBSCRIBE ─────────────────────────────────────────────────────
+            # When the frontend selects an instrument it sends:
+            #   { "type": "SUBSCRIBE", "instrument": "EUR_USD" }
+            #
+            # We respond immediately with a synthetic TICK carrying the cached
+            # price so the detail drawer updates at once rather than waiting up
+            # to several seconds for the next real Oanda tick.
+            if msg_type == "SUBSCRIBE":
+                ins = msg.get("instrument", "")
+                if ins in INSTRUMENTS:
+                    cached_price = _latest_prices.get(ins)
+                    if cached_price is not None:
+                        await ws.send_text(json.dumps({
+                            "type":       "TICK",
+                            "instrument": ins,
+                            "bid":        cached_price,
+                            "ask":        cached_price,
+                            "mid":        cached_price,
+                            "time":       str(int(time.time())),
+                        }))
+                    # Also push the latest signal history for this instrument
+                    signals = _signal_history.get(ins, [])
+                    if signals:
+                        await ws.send_text(json.dumps({
+                            "type":    "SIGNAL_HISTORY",
+                            "instrument": ins,
+                            "signals": signals[:5],
+                        }))
+
     except WebSocketDisconnect:
         _ws_clients.discard(ws)
         logger.info("WS client disconnected. Total: %d", len(_ws_clients))

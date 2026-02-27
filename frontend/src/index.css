@@ -3,16 +3,38 @@
 @tailwind utilities;
 
 @layer base {
+  /*
+   * Scrollability contract
+   * ──────────────────────
+   * The outer App shell uses an `overflow-y-auto` inner div as the scroll
+   * container (see App.jsx).  Setting `overflow-y: auto` on html/body/root
+   * ensures no ancestor ever clips it, which is required on:
+   *   • Android WebView (Capacitor) — clips on 'hidden' even when the child
+   *     sets its own overflow
+   *   • Safari iOS — same issue
+   *
+   * We do NOT use `overflow: hidden` anywhere in the base layer.
+   */
+  html {
+    overscroll-behavior: none;    /* disable pull-to-refresh / bounce */
+    overflow-y: auto !important;
+    height: 100%;
+  }
+
   body {
     @apply bg-void text-white;
     font-family: 'DM Sans', sans-serif;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
+    overflow-y: auto !important;
+    height: 100%;
+    margin: 0;
   }
 
-  /* Prevent overscroll on mobile */
-  html {
-    overscroll-behavior: none;
+  /* Vite/React root — must not clip the App shell */
+  #root {
+    overflow-y: auto !important;
+    height: 100%;
   }
 }
 
@@ -40,5 +62,14 @@
   /* Native-feel active state */
   .active-scale {
     @apply active:scale-[0.97] transition-transform duration-100;
+  }
+
+  /* Hide scrollbar track but keep scrollability */
+  .scrollbar-none {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+  .scrollbar-none::-webkit-scrollbar {
+    display: none;
   }
 }

@@ -3,6 +3,7 @@
 *.env.local
 .venv/
 venv/
+backend/venv/
 env/
 
 # --- PYTHON JUNK ---
