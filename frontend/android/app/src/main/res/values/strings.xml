@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">FX Radiant</string>
+    <string name="title_activity_main">FX Radiant</string>
+    <string name="package_name">com.fxradiant.app</string>
+    <string name="custom_url_scheme">com.fxradiant.app</string>
+</resources>
