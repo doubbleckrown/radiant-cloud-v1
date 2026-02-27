@@ -1,0 +1,24 @@
+# --- SENSITIVE DATA (CRITICAL) ---
+.env
+*.env.local
+.venv/
+venv/
+env/
+
+# --- PYTHON JUNK ---
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# --- NODE/FRONTEND JUNK ---
+node_modules/
+dist/
+.DS_Store
+
+# --- ANDROID STUDIO JUNK ---
+.gradle/
+build/
+captures/
+*.apk
+.idea/
