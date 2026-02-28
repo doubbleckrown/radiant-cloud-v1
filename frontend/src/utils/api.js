@@ -1,62 +1,49 @@
 import axios from "axios";
 
 // ---------------------------------------------------------------------------
-// Base URL comes from .env (VITE_API_URL).  The ?? fallback is only used when
-// running directly in a browser without a built env — e.g. unit tests.
+// Axios instance — base URL from .env
 // ---------------------------------------------------------------------------
 const api = axios.create({
   baseURL: (import.meta.env.VITE_API_URL ?? "http://localhost:8000") + "/api",
   timeout: 15_000,
 });
 
-// ── Request interceptor ─────────────────────────────────────────────────────
-// Token is already set on axios defaults by authStore.restoreToken() — nothing
-// extra needed here, but keeping the interceptor makes it easy to add
-// per-request logic later (e.g. request ID tracing).
-api.interceptors.request.use((config) => config);
+// ── Request interceptor — attach Clerk token automatically ──────────────────
+// Clerk's ClerkProvider sets window.Clerk.  We grab the fresh session token
+// before every request so the Bearer header is always current.
+// Clerk tokens are short-lived (~60 s) but getToken() returns a cached value
+// and only fetches a new one when the cached one is within ~10 s of expiry.
+api.interceptors.request.use(async (config) => {
+  try {
+    const token = await window.Clerk?.session?.getToken();
+    if (token) {
+      config.headers.Authorization = `Bearer ${token}`;
+    }
+  } catch {
+    // Session not ready yet (e.g. during initial load) — request proceeds
+    // without auth and the backend returns 401 which is handled below.
+  }
+  return config;
+});
 
-// ── Response interceptor ────────────────────────────────────────────────────
-// Enriches every rejected promise with a human-readable `userMessage` string
-// so components can just display `error.userMessage` without their own logic.
-//
-// Error taxonomy:
-//   • No response at all  → network is down / backend not running
-//                           userMessage = "Server Offline"
-//   • HTTP 401            → JWT is missing, expired, or invalid
-//                           → also auto-logout so the user lands back on login
-//   • HTTP 503            → backend reached Oanda but Oanda rejected/timed-out
-//                           → most likely a bad OANDA_API_KEY or account ID
-//   • Any other HTTP code → surface the detail from the backend JSON body
+// ── Response interceptor — human-readable error messages ───────────────────
 api.interceptors.response.use(
   (res) => res,
   async (error) => {
     if (!error.response) {
-      // ── Network / Connection Refused ──────────────────────────────────────
-      // error.request exists (the request was made) but no response arrived.
-      // This is the "Connection Refused" / "Server Offline" case.
       error.userMessage =
-        "Server Offline — cannot reach the backend (https://fx-radiant-backend.onrender.com). Check your internet connection.";
+        "Server Offline — cannot reach the backend. Check your internet connection.";
       return Promise.reject(error);
     }
 
     const { status, data } = error.response;
 
     if (status === 401) {
-      // ── Expired / invalid JWT ─────────────────────────────────────────────
-      // Silently log the user out so they land on the login screen.
-      error.userMessage = "Session expired — please log in again";
-      const { useAuthStore } = await import("../store/authStore");
-      useAuthStore.getState().logout();
-
+      error.userMessage = "Session expired — please sign in again";
     } else if (status === 503) {
-      // ── Oanda upstream error ──────────────────────────────────────────────
-      // The backend is up but Oanda rejected the request.  Almost always a
-      // bad API key or account ID in the backend .env.
       error.userMessage =
         "Oanda API unavailable — check OANDA_API_KEY and OANDA_ACCOUNT_ID in backend .env";
-
     } else {
-      // ── All other HTTP errors ─────────────────────────────────────────────
       error.userMessage =
         data?.detail ?? data?.message ?? `Request failed (${status})`;
     }

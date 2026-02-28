@@ -22,6 +22,7 @@ import { useEffect, useState, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import api from "../utils/api";
 import { useAuthStore } from "../store/authStore";
+import { useUser } from "@clerk/clerk-react";
 
 // ── Shared colour tokens ──────────────────────────────────────────────────────
 const C = {
@@ -42,11 +43,12 @@ const TABS = ["Summary", "Open Trades", "History"];
 
 // ─────────────────────────────────────────────────────────────────────────────
 export default function AccountPage() {
-  const { user, fetchMe, updateAutoTrade } = useAuthStore();
+  const { user: clerkUser } = useUser();
+  const { auto_trade_enabled, fetchMe, updateAutoTrade } = useAuthStore();
 
   const [toggling,    setToggling]    = useState(false);
   const [toggleError, setToggleError] = useState(null);
-  const autoTradeOn = user?.auto_trade_enabled ?? false;
+  const autoTradeOn = auto_trade_enabled ?? false;
 
   const [activeTab, setActiveTab] = useState("Summary");
   const [account,   setAccount]   = useState(null);

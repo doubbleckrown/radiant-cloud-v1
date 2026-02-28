@@ -1,13 +1,11 @@
 import { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useWebSocket } from "../hooks/useWebSocket";
-import { useAuthStore } from "../store/authStore";
 import api from "../utils/api";
 
 export default function SignalsPage() {
-  const { token } = useAuthStore();
   const [signals, setSignals] = useState([]);
-  const { lastMessage } = useWebSocket(token);
+  const { lastMessage } = useWebSocket(); // Clerk token fetched internally
 
   useEffect(() => {
     api.get("/signals").then(({ data }) => setSignals(data)).catch(() => {});

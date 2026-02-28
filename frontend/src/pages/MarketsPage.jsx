@@ -1,7 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useWebSocket } from "../hooks/useWebSocket";
-import { useAuthStore } from "../store/authStore";
 import SparklineChart from "../components/charts/SparklineChart";
 import AssetDetailDrawer from "../components/markets/AssetDetailDrawer";
 import api from "../utils/api";
@@ -31,7 +30,6 @@ const INSTRUMENT_META = {
 const FILTER_CATEGORIES = ["All", "Forex", "Metals", "Indices", "Crypto"];
 
 export default function MarketsPage() {
-  const { token } = useAuthStore();
   const [prices, setPrices]       = useState({});
   const [prevPrices, setPrev]     = useState({});
   const [flickerState, setFlicker] = useState({});
@@ -42,7 +40,8 @@ export default function MarketsPage() {
   const tickerRef = useRef({});
 
   // WebSocket for live ticks
-  const { lastMessage, send } = useWebSocket(token);
+  // WebSocket — Clerk token fetched internally
+  const { lastMessage, send } = useWebSocket();
 
   // When the user selects an instrument, immediately request the latest price
   // from the backend rather than waiting for the next Oanda tick (which could

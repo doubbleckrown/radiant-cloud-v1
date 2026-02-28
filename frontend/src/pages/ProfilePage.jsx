@@ -5,25 +5,26 @@
  * Tap the pencil icon → field opens in edit mode → confirm with ✓ or cancel with ✗.
  *
  * Editable fields:
- *   • Display Name       → PATCH /api/account/settings  { display_name }
- *   • Risk % Per Trade   → PATCH /api/account/settings  { risk_pct }     (slider 0.1–10 %)
- *   • Oanda API Key Hint → PATCH /api/account/settings  { oanda_key_hint } (last 4 chars)
+ * • Display Name       → PATCH /api/account/settings  { display_name }
+ * • Risk % Per Trade   → PATCH /api/account/settings  { risk_pct }     (slider 0.1–10 %)
+ * • Oanda API Key Hint → PATCH /api/account/settings  { oanda_key_hint } (last 4 chars)
  *
  * Read-only / navigational:
- *   • Auto-Trade status  → links conceptually to Account tab
- *   • Security           → placeholder (password change out of scope)
- *   • App Info           → static version string
+ * • Auto-Trade status  → links conceptually to Account tab
+ * • Security           → placeholder (password change out of scope)
+ * • App Info           → static version string
  *
  * Design tokens used:
- *   .active-scale        — native mobile press feel on every tappable element
- *   .border-glow-green   — glowing border on the actively edited field
- *   radiant-500 (#00FF41) — brand green
- *   void-*               — OLED-safe blacks
+ * .active-scale        — native mobile press feel on every tappable element
+ * .border-glow-green   — glowing border on the actively edited field
+ * radiant-500 (#00FF41) — brand green
+ * void-* — OLED-safe blacks
  */
 
 import { useState, useRef, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useAuthStore } from "../store/authStore";
+import { useUser, useClerk } from "@clerk/clerk-react";
 
 // ── EditIcon / CheckIcon / XIcon ─────────────────────────────────────────────
 const PencilIcon = () => (
@@ -54,7 +55,26 @@ const ChevronRight = () => (
 
 // ── Main component ────────────────────────────────────────────────────────────
 export default function ProfilePage() {
-  const { user, logout, updateSettings, fetchMe } = useAuthStore();
+  const { user: clerkUser } = useUser();
+  const { signOut } = useClerk();
+  const {
+    auto_trade_enabled,
+    risk_pct,
+    oanda_key_hint,
+    updateSettings,
+    fetchMe,
+  } = useAuthStore();
+
+  // Build a unified user object so the rest of the component is unchanged
+  const user = {
+    name:               clerkUser?.firstName
+                          ? `${clerkUser.firstName} ${clerkUser.lastName ?? ""}`.trim()
+                          : clerkUser?.username ?? "Trader",
+    email:              clerkUser?.primaryEmailAddress?.emailAddress ?? "",
+    auto_trade_active:  auto_trade_enabled,
+    risk_pct:           risk_pct,
+    oanda_key_hint:     oanda_key_hint,
+  };
 
   // Which field is currently open for editing: null | "name" | "risk" | "key"
   const [editing, setEditing] = useState(null);
@@ -356,7 +376,7 @@ export default function ProfilePage() {
         {/* ── Sign Out ──────────────────────────────────────────────────────── */}
         <motion.button
           whileTap={{ scale: 0.96 }}
-          onClick={logout}
+          onClick={() => signOut()}
           className="active-scale w-full py-4 rounded-2xl font-display tracking-widest uppercase text-sm"
           style={{
             background: "transparent",
@@ -651,7 +671,6 @@ function RiskSlider({ value, onChange }) {
 }
 
 // ── Slider thumb styles injected once ────────────────────────────────────────
-// (webkit / moz thumb styling can't be done in Tailwind, so we inject it)
 if (typeof document !== "undefined" && !document.getElementById("risk-slider-style")) {
   const style = document.createElement("style");
   style.id    = "risk-slider-style";

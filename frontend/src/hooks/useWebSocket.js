@@ -1,142 +1,77 @@
-/**
- * useWebSocket — auto-reconnecting WebSocket hook
- *
- * Fix: WS URL is now derived from VITE_API_URL so the Android emulator
- * (or any non-localhost device) only needs ONE env var change:
- *
- *   VITE_API_URL=http://192.168.1.x:8000   ← your Mac's LAN IP
- *
- * The hook converts it automatically:
- *   http://192.168.1.x:8000  →  ws://192.168.1.x:8000/ws
- *   https://api.example.com  →  wss://api.example.com/ws
- *
- * You can still override with VITE_WS_URL if you need a custom path.
- *
- * Token is appended as a query param:  ws://host:8000/ws?token=eyJ...
- * The backend reads it via:  async def websocket_endpoint(ws, token: str = "")
- */
-
 import { useEffect, useRef, useState, useCallback } from "react";
 
-/**
- * Derive the WebSocket base URL from VITE_API_URL.
- * Replaces the http(s) scheme with ws(s) and strips the /api path suffix.
- *
- * Examples:
- *   http://localhost:8000/api  →  ws://localhost:8000/ws
- *   http://192.168.1.5:8000    →  ws://192.168.1.5:8000/ws
- *   https://api.fxradiant.com  →  wss://api.fxradiant.com/ws
- */
-function deriveWsUrl() {
-  // Explicit override always wins
-  if (import.meta.env.VITE_WS_URL) return import.meta.env.VITE_WS_URL;
+const WS_BASE = import.meta.env.VITE_WS_URL ?? "ws://localhost:8000/ws";
 
-  const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
-
-  // Strip trailing /api or /api/ — we only need the host:port
-  const base = apiUrl.replace(/\/api\/?$/, "");
-
-  // Replace scheme: http → ws, https → wss
-  const wsBase = base.replace(/^http/, "ws");
-
-  return `${wsBase}/ws`;
-}
-
-const WS_BASE = deriveWsUrl();
-
-export function useWebSocket(token) {
+export function useWebSocket() {
   const [lastMessage, setLastMessage] = useState(null);
-  const [status, setStatus]           = useState("disconnected");
-  const wsRef     = useRef(null);
-  const timerRef  = useRef(null);
-  const retryRef  = useRef(null);
+  const [wsStatus,    setWsStatus]    = useState("disconnected");
+  const wsRef    = useRef(null);
+  const timerRef = useRef(null);
 
-  const connect = useCallback(() => {
-    // Don't connect without a token — the backend will reject with 4001
+  const connect = useCallback(async () => {
+    // Guard: don't open a second connection if already open/connecting
+    if (wsRef.current?.readyState === WebSocket.OPEN)  return;
+    if (wsRef.current?.readyState === WebSocket.CONNECTING) return;
+
+    // Get the current Clerk session token (cached — no network round-trip)
+    let token = "";
+    try {
+      token = (await window.Clerk?.session?.getToken()) ?? "";
+    } catch {
+      // Clerk not ready yet — retry in 3 s
+      setTimeout(connect, 3_000);
+      return;
+    }
+
     if (!token) {
-      setStatus("no-token");
+      // Not signed in yet — retry in 3 s
+      setTimeout(connect, 3_000);
       return;
     }
 
-    // Don't open a second connection if one is already live
-    const ws = wsRef.current;
-    if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
-      return;
-    }
+    const url = `${WS_BASE}?token=${token}`;
+    const ws  = new WebSocket(url);
+    wsRef.current = ws;
+    setWsStatus("connecting");
 
-    // Append token as query param — backend reads it as: token: str = ""
-    const url = `${WS_BASE}?token=${encodeURIComponent(token)}`;
-    console.debug("[WS] connecting to", url.replace(token, token.slice(0, 12) + "…"));
-
-    const newWs = new WebSocket(url);
-    wsRef.current = newWs;
-    setStatus("connecting");
-
-    newWs.onopen = () => {
-      console.debug("[WS] connected");
-      setStatus("connected");
-      // Keep-alive ping every 20 s — prevents Oanda proxy / Nginx timeouts
+    ws.onopen = () => {
+      setWsStatus("connected");
+      // Keep-alive ping every 20 s
       timerRef.current = setInterval(() => {
-        if (newWs.readyState === WebSocket.OPEN) newWs.send("ping");
+        if (ws.readyState === WebSocket.OPEN) ws.send("ping");
       }, 20_000);
     };
 
-    newWs.onmessage = (evt) => {
+    ws.onmessage = (evt) => {
       try {
         const data = JSON.parse(evt.data);
-
-        // Log auth errors clearly so they show in the browser console
-        if (data.type === "AUTH_ERROR") {
-          console.error("[WS] AUTH_ERROR from server:", data.reason);
-          setStatus("auth-error");
-          return;
-        }
-
         setLastMessage(data);
-      } catch {
-        // Ignore non-JSON frames (e.g. pong responses)
-      }
+      } catch { /* ignore */ }
     };
 
-    newWs.onclose = (evt) => {
-      console.debug("[WS] closed  code=%d  reason=%s", evt.code, evt.reason || "(none)");
-      setStatus("disconnected");
+    ws.onclose = () => {
+      setWsStatus("disconnected");
       clearInterval(timerRef.current);
-      clearTimeout(retryRef.current);
-
-      // Don't retry on auth failure — would just loop forever
-      if (evt.code === 4001) {
-        setStatus("auth-error");
-        console.error("[WS] Auth rejected by server (code 4001). Check your token.");
-        return;
-      }
-
-      // Exponential back-off: 3 s, then 6 s, then 10 s
-      const delay = evt.code === 1006 ? 6_000 : 3_000;
-      retryRef.current = setTimeout(connect, delay);
+      // Reconnect after 3 s (with a fresh Clerk token)
+      setTimeout(connect, 3_000);
     };
 
-    newWs.onerror = (err) => {
-      console.error("[WS] error — will close and retry", err);
-      newWs.close();
-    };
-  }, [token]);
+    ws.onerror = () => ws.close();
+  }, []);
 
   useEffect(() => {
     connect();
     return () => {
       clearInterval(timerRef.current);
-      clearTimeout(retryRef.current);
       wsRef.current?.close();
     };
   }, [connect]);
 
   const send = useCallback((data) => {
-    const ws = wsRef.current;
-    if (ws?.readyState === WebSocket.OPEN) {
-      ws.send(typeof data === "string" ? data : JSON.stringify(data));
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify(data));
     }
   }, []);
 
-  return { lastMessage, status, send };
+  return { lastMessage, wsStatus, send };
 }

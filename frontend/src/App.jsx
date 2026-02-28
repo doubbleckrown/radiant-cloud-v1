@@ -1,7 +1,7 @@
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { useAuthStore } from "./store/authStore";
-import LoginPage from "./pages/LoginPage";
+import { SignedIn, SignedOut } from "@clerk/clerk-react";
+import AuthPage from "./pages/AuthPage";
 import MarketsPage from "./pages/MarketsPage";
 import SignalsPage from "./pages/SignalsPage";
 import AccountPage from "./pages/AccountPage";
@@ -22,12 +22,7 @@ const TABS = [
 ];
 
 export default function App() {
-  const { isAuthenticated } = useAuthStore();
   const [activeTab, setActiveTab] = useState("markets");
-
-  if (!isAuthenticated) {
-    return <LoginPage />;
-  }
 
   const Page = {
     markets: MarketsPage,
@@ -37,43 +32,53 @@ export default function App() {
   }[activeTab];
 
   return (
-    <div
-      className="relative w-full h-screen bg-void select-none"
-      style={{ fontFamily: "'DM Sans', sans-serif", overflow: "clip" }}
-    >
-      {/* Scanline overlay — subtle OLED texture */}
-      <div
-        className="pointer-events-none absolute inset-0 z-50 opacity-[0.025]"
-        style={{
-          backgroundImage: "repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,255,65,0.08) 2px, rgba(0,255,65,0.08) 4px)",
-        }}
-      />
+    <>
+      {/* ── Not signed in → show Clerk auth screen ── */}
+      <SignedOut>
+        <AuthPage />
+      </SignedOut>
 
-      {/* Status bar safe area */}
-      <div className="h-safe-top bg-void" />
+      {/* ── Signed in → show the full trading dashboard ── */}
+      <SignedIn>
+        <div
+          className="relative w-full h-screen bg-void select-none"
+          style={{ fontFamily: "'DM Sans', sans-serif", overflow: "clip" }}
+        >
+          {/* Scanline overlay — subtle OLED texture */}
+          <div
+            className="pointer-events-none absolute inset-0 z-50 opacity-[0.025]"
+            style={{
+              backgroundImage: "repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,255,65,0.08) 2px, rgba(0,255,65,0.08) 4px)",
+            }}
+          />
 
-      {/* Main content area */}
-      <div
-        className="absolute inset-0 overflow-y-auto"
-        style={{ paddingBottom: "calc(72px + env(safe-area-inset-bottom))" }}
-      >
-        <AnimatePresence mode="wait">
-          <motion.div
-            key={activeTab}
-            variants={pageVariants}
-            initial="initial"
-            animate="animate"
-            exit="exit"
-            className="min-h-full"
+          {/* Status bar safe area */}
+          <div className="h-safe-top bg-void" />
+
+          {/* Main content */}
+          <div
+            className="absolute inset-0 overflow-y-auto"
+            style={{ paddingBottom: "calc(72px + env(safe-area-inset-bottom))" }}
           >
-            <Page />
-          </motion.div>
-        </AnimatePresence>
-      </div>
+            <AnimatePresence mode="wait">
+              <motion.div
+                key={activeTab}
+                variants={pageVariants}
+                initial="initial"
+                animate="animate"
+                exit="exit"
+                className="min-h-full"
+              >
+                <Page />
+              </motion.div>
+            </AnimatePresence>
+          </div>
 
-      {/* Bottom Tab Bar */}
-      <TabBar tabs={TABS} activeTab={activeTab} onTabChange={setActiveTab} />
-    </div>
+          {/* Bottom Tab Bar */}
+          <TabBar tabs={TABS} activeTab={activeTab} onTabChange={setActiveTab} />
+        </div>
+      </SignedIn>
+    </>
   );
 }
 
