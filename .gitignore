@@ -24,4 +24,4 @@ dist/
 build/
 captures/
 *.apk
-.idea/
+.idea/**/ .env
