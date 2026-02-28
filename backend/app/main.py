@@ -13,6 +13,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -53,7 +54,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from jose import JWTError, jwt
 from passlib.context import CryptContext
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel
 
 from app.services.strategy import Candle, SMCConfluenceEngine, TradeSignal
 
@@ -93,8 +94,29 @@ logging.basicConfig(level=logging.INFO)
 #  In-memory stores (replace with Redis / Postgres in production)
 # ─────────────────────────────────────────────────────────────────────────────
 
-# {email: {password_hash, ...}}
-_users_db: dict[str, dict] = {}
+# ── User store — file-backed so accounts survive Render sleep/restarts ──────
+# Render free tier restarts Python on every cold-start (after ~15 min idle).
+# Storing users in a JSON file on disk means they persist across sleep cycles.
+# (They are wiped on a full re-deploy, but NOT on idle restarts.)
+_USERS_FILE = Path(__file__).resolve().parent.parent / "users.json"
+
+def _load_users() -> dict:
+    try:
+        if _USERS_FILE.exists():
+            import json as _json
+            return _json.loads(_USERS_FILE.read_text())
+    except Exception:
+        pass
+    return {}
+
+def _save_users(db: dict) -> None:
+    try:
+        import json as _json
+        _USERS_FILE.write_text(_json.dumps(db))
+    except Exception as exc:
+        logger.warning("Could not persist users: %s", exc)
+
+_users_db: dict[str, dict] = _load_users()
 
 # {instrument: {granularity: [Candle]}}
 _candle_cache: dict[str, dict[str, list[Candle]]] = {
@@ -579,8 +601,10 @@ async def _global_exception_handler(request: Request, exc: Exception) -> JSONRes
 #  Pydantic schemas
 # ─────────────────────────────────────────────────────────────────────────────
 
+_EMAIL_RE = re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
+
 class SignupRequest(BaseModel):
-    email:    EmailStr
+    email:    str        # validated by regex below — no email-validator dep needed
     password: str
     name:     str
 
@@ -614,31 +638,38 @@ class UserSettingsRequest(BaseModel):
 
 @app.post("/api/auth/signup", response_model=LoginResponse, status_code=201)
 async def signup(body: SignupRequest):
-    if body.email in _users_db:
+    # Validate email format (replaces EmailStr — no extra package needed)
+    if not _EMAIL_RE.match(body.email.strip()):
+        raise HTTPException(422, "Invalid email address")
+    email = body.email.strip().lower()
+    if email in _users_db:
         raise HTTPException(400, "Email already registered")
-    _users_db[body.email] = {
-        "email":              body.email,
+    _users_db[email] = {
+        "email":              email,
         "name":               body.name,
         "password":           hash_password(body.password),
-        "auto_trade_enabled": False,   # must be explicitly enabled by the user
+        "auto_trade_enabled": False,
     }
-    user_safe = {"email": body.email, "name": body.name}
+    _save_users(_users_db)        # ← persist so user survives server restarts
+    user_safe = {"email": email, "name": body.name}
     return LoginResponse(
-        access_token=create_access_token(body.email),
-        refresh_token=create_refresh_token(body.email),
+        access_token=create_access_token(email),
+        refresh_token=create_refresh_token(email),
         user=user_safe,
     )
 
 
 @app.post("/api/auth/login", response_model=LoginResponse)
 async def login(form: OAuth2PasswordRequestForm = Depends()):
-    user = _users_db.get(form.username)
+    # Normalise to lowercase so "Trader@gmail.com" matches "trader@gmail.com"
+    email = form.username.strip().lower()
+    user = _users_db.get(email)
     if not user or not verify_password(form.password, user["password"]):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid credentials")
     user_safe = {"email": user["email"], "name": user["name"]}
     return LoginResponse(
-        access_token=create_access_token(form.username),
-        refresh_token=create_refresh_token(form.username),
+        access_token=create_access_token(email),
+        refresh_token=create_refresh_token(email),
         user=user_safe,
     )
 
