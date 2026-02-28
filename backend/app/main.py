@@ -57,6 +57,10 @@ CLERK_JWKS_URL = os.getenv(
     "https://immune-donkey-10.clerk.accounts.dev/.well-known/jwks.json",
 )
 
+# OneSignal push notification config (optional — push is silently disabled if absent)
+ONESIGNAL_APP_ID  = os.getenv("ONESIGNAL_APP_ID",  "")
+ONESIGNAL_REST_KEY = os.getenv("ONESIGNAL_REST_KEY", "")
+
 INSTRUMENTS = [
     "EUR_USD", "GBP_USD", "USD_JPY", "AUD_USD",
     "NZD_USD", "USD_CAD", "USD_CHF",
@@ -101,6 +105,11 @@ _signal_history: dict[str, list[dict]] = {ins: [] for ins in INSTRUMENTS}
 _engines:        dict[str, SMCConfluenceEngine] = {
     ins: SMCConfluenceEngine(ins) for ins in INSTRUMENTS
 }
+
+# OneSignal player IDs registered by the frontend.
+# In production you'd persist these to a database; in-memory is fine for a
+# single-user deployment because Render restarts are infrequent.
+_push_subscriptions: set[str] = set()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -282,6 +291,48 @@ async def broadcast(message: dict) -> None:
     _ws_clients.difference_update(dead)
 
 
+async def _send_onesignal_push(title: str, body: str, data: dict) -> None:
+    """
+    Send a push notification to all registered devices via the OneSignal REST API.
+    Silently skips if ONESIGNAL_APP_ID / ONESIGNAL_REST_KEY are not set,
+    or if there are no registered subscribers.
+    """
+    if not ONESIGNAL_APP_ID or not ONESIGNAL_REST_KEY:
+        return
+    if not _push_subscriptions:
+        return
+    payload = {
+        "app_id":                       ONESIGNAL_APP_ID,
+        "include_subscription_ids":     list(_push_subscriptions),
+        "headings":                     {"en": title},
+        "contents":                     {"en": body},
+        "data":                         data,
+        # Android: make the device vibrate
+        "android_vibrate":              True,
+        # iOS / Android: custom sound
+        "ios_sound":                    "default",
+        "android_sound":                "default",
+        # Collapse duplicate signal notifications for the same instrument
+        "collapse_id":                  data.get("instrument", "fx-radiant"),
+    }
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.post(
+                "https://onesignal.com/api/v1/notifications",
+                headers={
+                    "Authorization": f"Basic {ONESIGNAL_REST_KEY}",
+                    "Content-Type":  "application/json",
+                },
+                json=payload,
+            )
+        if resp.status_code not in (200, 201):
+            logger.warning("OneSignal push failed: %s — %s", resp.status_code, resp.text[:200])
+        else:
+            logger.info("📲 Push sent to %d subscriber(s): %s", len(_push_subscriptions), body[:60])
+    except Exception as exc:
+        logger.warning("OneSignal push error: %s", exc)
+
+
 async def candle_refresh_loop() -> None:
     FETCH_TIMEOUT = 25.0
     MAX_BACKOFF   = 40.0
@@ -336,6 +387,28 @@ async def candle_refresh_loop() -> None:
                             _signal_history[ins] = ([sig_dict] + _signal_history[ins])[:50]
                             await broadcast(sig_dict)
                             logger.info("🟢 SIGNAL: %s %s", ins, signal.direction.value)
+
+                            # ── Push notification for high-confluence setups ──────────────
+                            if signal.confidence >= 95:
+                                ins_label  = ins.replace("_", "/")
+                                dir_label  = signal.direction.value.title()
+                                entry_fmt  = f"{signal.entry_price:.5f}"
+                                push_title = f"🚨 High Probability Setup: {ins_label} {dir_label}"
+                                push_body  = (
+                                    f"Entry at {entry_fmt}  ·  "
+                                    f"{signal.confidence}% confluence  ·  "
+                                    f"R:R 1:{signal.risk_reward}"
+                                )
+                                asyncio.create_task(_send_onesignal_push(
+                                    title = push_title,
+                                    body  = push_body,
+                                    data  = {
+                                        "instrument": ins,
+                                        "direction":  signal.direction.value,
+                                        "entry":      round(signal.entry_price, 5),
+                                        "confidence": signal.confidence,
+                                    },
+                                ))
                 except Exception as smc_exc:
                     logger.warning("SMC error %s: %s", ins, smc_exc)
 
@@ -462,6 +535,10 @@ class OrderRequest(BaseModel):
     take_profit: float
 
 
+class PushRegisterRequest(BaseModel):
+    player_id: str
+
+
 class UserSettingsRequest(BaseModel):
     auto_trade_enabled: Optional[bool]  = None
     risk_pct:           Optional[float] = None
@@ -511,6 +588,23 @@ async def update_user_settings(
         "risk_pct":           s["risk_pct"],
         "oanda_key_hint":     s["oanda_key_hint"],
     }
+
+
+@app.post("/api/push/register")
+async def register_push(
+    body:    PushRegisterRequest,
+    payload: dict = Depends(get_current_user),
+):
+    """
+    Register a OneSignal player/subscription ID for push notifications.
+    The frontend sends this after the user grants notification permission.
+    """
+    pid = body.player_id.strip()
+    if not pid:
+        raise HTTPException(400, "player_id is required")
+    _push_subscriptions.add(pid)
+    logger.info("📲 Push registered: %s… (%d total)", pid[:8], len(_push_subscriptions))
+    return {"registered": True, "total_subscribers": len(_push_subscriptions)}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
