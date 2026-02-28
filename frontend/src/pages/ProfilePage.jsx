@@ -150,7 +150,7 @@ export default function ProfilePage() {
             <p className="text-white text-xl font-display tracking-wide">
               {user?.name ?? "Trader"}
             </p>
-            <p className="text-void-700 text-sm mt-0.5">{user?.email}</p>
+            <p style={{ color: "#aaaaaa", fontSize: "0.875rem", marginTop: 2 }}>{user?.email}</p>
           </div>
         </div>
 
@@ -260,7 +260,7 @@ export default function ProfilePage() {
                 className="w-full bg-transparent outline-none text-white text-sm font-mono placeholder-void-600 tracking-widest"
                 style={{ caretColor: "#00FF41", fontFamily: "'JetBrains Mono', monospace" }}
               />
-              <p className="text-void-700 text-[10px] font-display tracking-wide">
+              <p style={{ color: "#aaaaaa", fontSize: "0.625rem", letterSpacing: "0.05em" }}>
                 For security, only the last 4 characters are stored here. Configure the full
                 key in your .env file on the server.
               </p>
@@ -318,7 +318,7 @@ export default function ProfilePage() {
               {isAutoOn ? "ON" : "OFF"}
             </span>
           </div>
-          <p className="text-void-600 text-xs px-1 font-display tracking-wide">
+          <p style={{ color: "#777777", fontSize: "0.75rem", padding: "0 4px", letterSpacing: "0.04em" }}>
             Toggle auto-trade from the Account → Summary tab.
           </p>
         </Section>
@@ -383,7 +383,7 @@ const ACCESS_EXPIRE_MINUTES_DISPLAY = "60 min";
 function Section({ label, children }) {
   return (
     <div>
-      <div className="text-[10px] font-display tracking-widest text-void-700 uppercase px-1 mb-2">
+      <div style={{ color: "#aaaaaa", fontSize: "0.625rem", letterSpacing: "0.12em", textTransform: "uppercase", padding: "0 4px", marginBottom: 8 }}>
         {label}
       </div>
       <div
@@ -428,12 +428,12 @@ function EditableRow({
         </div>
 
         <div className="flex-1 min-w-0">
-          <div className="text-void-800 text-[11px] font-display uppercase tracking-wider">{label}</div>
+          <div style={{ color: "#aaaaaa", fontSize: "0.6875rem", textTransform: "uppercase", letterSpacing: "0.08em" }}>{label}</div>
           {!isEditing && (
             <div className="text-white text-sm font-body mt-0.5 truncate">{value}</div>
           )}
           {!isEditing && valueSub && (
-            <div className="text-void-600 text-[10px] mt-0.5">{valueSub}</div>
+            <div style={{ color: "#777777", fontSize: "0.625rem", marginTop: 2 }}>{valueSub}</div>
           )}
         </div>
 
@@ -539,9 +539,9 @@ function StaticRow({ icon, label, value, sub, tappable = false, onTap }) {
         {icon}
       </div>
       <div className="flex-1 min-w-0">
-        <div className="text-void-800 text-[11px] font-display uppercase tracking-wider">{label}</div>
+        <div style={{ color: "#aaaaaa", fontSize: "0.6875rem", textTransform: "uppercase", letterSpacing: "0.08em" }}>{label}</div>
         <div className="text-white text-sm font-body mt-0.5 truncate">{value}</div>
-        {sub && <div className="text-void-600 text-[10px] mt-0.5">{sub}</div>}
+        {sub && <div style={{ color: "#777777", fontSize: "0.625rem", marginTop: 2 }}>{sub}</div>}
       </div>
       {tappable && <ChevronRight />}
     </>
@@ -630,7 +630,7 @@ function RiskSlider({ value, onChange }) {
       </div>
 
       {/* Tick labels */}
-      <div className="flex justify-between text-[10px] text-void-600 font-display">
+      <div className="flex justify-between" style={{ fontSize: "0.625rem", color: "#777777" }}>
         <span>0.1%</span>
         <span>2.5%</span>
         <span>5%</span>

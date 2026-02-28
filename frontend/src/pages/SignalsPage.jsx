@@ -31,7 +31,7 @@ export default function SignalsPage() {
         }}
       >
         <h1 className="text-xl font-display text-white tracking-wide">Signals</h1>
-        <p className="text-void-800 text-xs mt-0.5">100% confluence · SMC/ICT confirmed</p>
+        <p style={{ color: "#aaaaaa", fontSize: "0.72rem", marginTop: 2 }}>100% confluence · SMC/ICT confirmed</p>
       </div>
 
       <div className="px-4 py-3 space-y-3">
@@ -46,8 +46,8 @@ export default function SignalsPage() {
               <span className="text-2xl">⚡</span>
             </motion.div>
             <div className="text-center">
-              <p className="text-void-700 font-display tracking-wide text-sm uppercase">Awaiting confluence</p>
-              <p className="text-void-600 text-xs mt-1">Signals fire when all 3 SMC layers align</p>
+              <p style={{ color: "#aaaaaa", fontSize: "0.875rem", letterSpacing: "0.06em", textTransform: "uppercase" }}>Awaiting confluence</p>
+              <p style={{ color: "#777777", fontSize: "0.72rem", marginTop: 4 }}>Signals fire when all 3 SMC layers align</p>
             </div>
           </div>
         )}
@@ -97,7 +97,7 @@ export default function SignalsPage() {
                       {sig.direction === "LONG" ? "▲ LONG" : "▼ SHORT"}
                     </span>
                   </div>
-                  <span className="font-display text-xs text-void-700 tracking-wide">
+                  <span style={{ color: "#aaaaaa", fontSize: "0.72rem", letterSpacing: "0.05em" }}>
                     {new Date(sig.timestamp * 1000).toLocaleTimeString()}
                   </span>
                 </div>
@@ -114,7 +114,7 @@ export default function SignalsPage() {
                       className="px-2 py-2 rounded-xl text-center"
                       style={{ background: "#141414", border: "1px solid rgba(255,255,255,0.05)" }}
                     >
-                      <div className="text-void-700 text-[10px] font-display uppercase tracking-wider mb-1">{label}</div>
+                      <div style={{ color: "#aaaaaa", fontSize: "0.6rem", letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 4 }}>{label}</div>
                       <div
                         className="font-mono text-xs font-semibold"
                         style={{
@@ -131,17 +131,18 @@ export default function SignalsPage() {
 
                 {/* SMC layer info */}
                 <div
-                  className="px-3 py-2 rounded-xl font-mono text-xs text-void-700 space-y-0.5"
+                  className="px-3 py-2 rounded-xl font-mono text-xs"
                   style={{
+                    color: "#aaaaaa",
                     background: "rgba(0,0,0,0.4)",
                     border: "1px solid rgba(255,255,255,0.04)",
                     fontFamily: "'JetBrains Mono', monospace",
                   }}
                 >
-                  <div><span className="text-void-600">L1</span> <span className="text-white">{sig.layer1}</span></div>
-                  <div><span className="text-void-600">L2</span> <span className="text-white">{sig.layer2}</span></div>
-                  <div><span className="text-void-600">L3</span> <span style={{ color: "#00FF41" }}>MSS CONFIRMED</span></div>
-                  <div><span className="text-void-600">RR</span> <span className="text-white">1:{sig.rr}</span></div>
+                  <div><span style={{ color: "#777777" }}>L1</span> <span className="text-white">{sig.layer1}</span></div>
+                  <div><span style={{ color: "#777777" }}>L2</span> <span className="text-white">{sig.layer2}</span></div>
+                  <div><span style={{ color: "#777777" }}>L3</span> <span style={{ color: "#00FF41" }}>MSS CONFIRMED</span></div>
+                  <div><span style={{ color: "#777777" }}>RR</span> <span className="text-white">1:{sig.rr}</span></div>
                 </div>
               </div>
             </motion.div>

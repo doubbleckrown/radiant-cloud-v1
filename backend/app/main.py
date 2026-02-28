@@ -45,9 +45,10 @@ except ImportError:
 
 import httpx
 from fastapi import (
-    Depends, FastAPI, HTTPException, WebSocket,
+    Depends, FastAPI, HTTPException, Request, WebSocket,
     WebSocketDisconnect, status,
 )
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from jose import JWTError, jwt
@@ -543,21 +544,35 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        # ── Production ───────────────────────────────────────────────────────
-        "https://radiant-cloud-v1.vercel.app",
-        # Vercel adds a trailing slash in some redirect flows — include both
-        "https://radiant-cloud-v1.vercel.app/",
-        # ── Local development ────────────────────────────────────────────────
-        "http://localhost:5173",
-        "http://localhost:3000",
-        "http://127.0.0.1:5173",
-        "http://192.168.0.157:5173",
-    ],
-    allow_credentials=True,
+    # ── Why allow_origins=["*"] works here ───────────────────────────────────
+    # This app uses JWT Bearer tokens in the Authorization header — NOT cookies.
+    # "Credentialed" CORS (allow_credentials=True) only applies to cookie /
+    # HTTP-auth flows.  Bearer headers are just non-simple request headers that
+    # go through a preflight.  Wildcard + credentials=False is therefore both
+    # spec-compliant and sufficient.
+    #
+    # Mixing "*" + credentials=True is *illegal* per the CORS spec and causes
+    # browsers to hard-block requests — that was the previous bug.
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ── Global 500 handler — always stamp CORS header ────────────────────────────
+# When FastAPI raises an unhandled exception Starlette's CORSMiddleware never
+# runs, so the browser sees "no CORS header" and reports a CORS error even
+# though the real problem is a server crash.  This handler catches every
+# unhandled Traceback and returns a JSON 500 that ALWAYS has the CORS header.
+@app.exception_handler(Exception)
+async def _global_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    logger.exception("Unhandled exception on %s %s", request.method, request.url)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Internal server error"},
+        headers={"Access-Control-Allow-Origin": "*"},
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

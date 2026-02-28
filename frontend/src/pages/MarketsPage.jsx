@@ -120,7 +120,7 @@ export default function MarketsPage() {
         <div className="flex items-center justify-between mb-3">
           <div>
             <h1 className="text-xl font-display text-white tracking-wide">Markets</h1>
-            <p className="text-void-800 text-xs mt-0.5">
+            <p style={{ color: "#aaaaaa", fontSize: "0.72rem", marginTop: 2 }}>
               {Object.keys(prices).length} live instruments
             </p>
           </div>
@@ -146,7 +146,7 @@ export default function MarketsPage() {
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Search instruments..."
-            className="flex-1 bg-transparent text-sm text-white placeholder-void-600 outline-none"
+            className="flex-1 bg-transparent outline-none" style={{ fontSize: "0.875rem", color: "#ffffff" }}
           />
         </div>
 
@@ -229,7 +229,7 @@ export default function MarketsPage() {
                       <ConfidenceBadge confidence={confidence} bias={bias} />
                     )}
                   </div>
-                  <span className="text-void-700 text-xs">{meta.category}</span>
+                  <span style={{ color: "#aaaaaa", fontSize: "0.72rem" }}>{meta.category}</span>
                 </div>
 
                 {/* Sparkline + price */}
