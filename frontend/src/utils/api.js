@@ -35,7 +35,7 @@ api.interceptors.response.use(
       // error.request exists (the request was made) but no response arrived.
       // This is the "Connection Refused" / "Server Offline" case.
       error.userMessage =
-        "Server Offline — make sure the backend is running on 192.168.0.157:8000";
+        "Server Offline — cannot reach the backend (https://fx-radiant-backend.onrender.com). Check your internet connection.";
       return Promise.reject(error);
     }
 

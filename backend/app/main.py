@@ -242,6 +242,29 @@ async def fetch_account_summary() -> dict:
     return resp.json().get("account", {})
 
 
+async def fetch_open_trades() -> list:
+    """Return all currently open trades for the account."""
+    if not _oanda_credentials_ok():
+        raise RuntimeError("OANDA credentials not set")
+    url = f"{OANDA_BASE}/v3/accounts/{OANDA_ACCOUNT}/openTrades"
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.get(url, headers=_oanda_headers())
+        resp.raise_for_status()
+    return resp.json().get("trades", [])
+
+
+async def fetch_trade_history(count: int = 50) -> list:
+    """Return the most recent closed trades for the account."""
+    if not _oanda_credentials_ok():
+        raise RuntimeError("OANDA credentials not set")
+    url = f"{OANDA_BASE}/v3/accounts/{OANDA_ACCOUNT}/trades"
+    params = {"state": "CLOSED", "count": str(count)}
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.get(url, headers=_oanda_headers(), params=params)
+        resp.raise_for_status()
+    return resp.json().get("trades", [])
+
+
 async def place_market_order(
     instrument: str,
     units: int,   # negative = short
@@ -520,7 +543,17 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],   # tighten in production
+    allow_origins=[
+        # ── Production ───────────────────────────────────────────────────────
+        "https://radiant-cloud-v1.vercel.app",
+        # Vercel adds a trailing slash in some redirect flows — include both
+        "https://radiant-cloud-v1.vercel.app/",
+        # ── Local development ────────────────────────────────────────────────
+        "http://localhost:5173",
+        "http://localhost:3000",
+        "http://127.0.0.1:5173",
+        "http://192.168.0.157:5173",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -715,6 +748,24 @@ async def get_signals(_: dict = Depends(get_current_user)):
 async def get_account(_: dict = Depends(get_current_user)):
     try:
         return await fetch_account_summary()
+    except Exception as e:
+        raise HTTPException(503, f"Oanda error: {e}")
+
+
+@app.get("/api/account/trades")
+async def get_open_trades(_: dict = Depends(get_current_user)):
+    """Return all currently open trades."""
+    try:
+        return await fetch_open_trades()
+    except Exception as e:
+        raise HTTPException(503, f"Oanda error: {e}")
+
+
+@app.get("/api/account/history")
+async def get_trade_history(_: dict = Depends(get_current_user)):
+    """Return the 50 most recent closed trades."""
+    try:
+        return await fetch_trade_history(count=50)
     except Exception as e:
         raise HTTPException(503, f"Oanda error: {e}")
 

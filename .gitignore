@@ -7,10 +7,12 @@ backend/venv/
 env/
 
 # --- PYTHON JUNK ---
-__pycache__/
+
 *.py[cod]
 *$py.class
 .pytest_cache/
+__pycache__/
+*.pyc
 
 # --- NODE/FRONTEND JUNK ---
 node_modules/

@@ -29,10 +29,13 @@ export default {
           300: "#1f1f1f",
           400: "#2a2a2a",
           500: "#333333",
-          600: "#404040",
-          700: "#4d4d4d",
-          800: "#666666",
-          900: "#808080",
+          // 600-900 are used as "muted label" text on dark cards.
+          // Values below #888 on #0f0f0f fail WCAG AA contrast.
+          // These are deliberately lightened so labels are readable on iPhone.
+          600: "#666666",   // was #404040 — contrast fix
+          700: "#999999",   // was #4d4d4d — contrast fix (≈5.2:1 on #0f0f0f)
+          800: "#bbbbbb",   // was #666666 — contrast fix
+          900: "#d4d4d4",   // was #808080 — contrast fix
         },
         // ── Semantic ──────────────────────────────────────────────────────────
         bull:   "#00FF41",   // same as radiant-500 (long / buy)

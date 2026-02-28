@@ -38,6 +38,25 @@
   }
 }
 
+/* ── Global text-on-dark safety net ────────────────────────────────────────
+ * Vercel's build may bundle CSS that causes Tailwind utility classes to
+ * resolve differently from local dev (different purge results, SSR, etc.).
+ * These rules enforce readable contrast across ALL environments.
+ * They only apply to elements that have NOT been given an explicit color.
+ */
+@layer base {
+  /* Default text colour for anything not explicitly set */
+  h1, h2, h3, h4, h5, h6 { color: #ffffff; }
+  p, span, div, li, td, th, label, button { color: inherit; }
+
+  /* Ensure inputs are readable */
+  input, textarea, select {
+    color: #ffffff;
+    background-color: transparent;
+  }
+  input::placeholder, textarea::placeholder { color: #666666; }
+}
+
 @layer utilities {
   /* Neon text glow utility */
   .text-glow-green {
