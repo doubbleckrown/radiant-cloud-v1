@@ -1,277 +1,486 @@
+/**
+ * MarketsPage
+ * ══════════════════════════════════════════════════════════════
+ * • Live prices via WebSocket
+ * • Accordion: click any instrument → inline LW-Charts area chart
+ *   expands directly under that row, pushing rows below it down
+ * • Design tokens identical to AccountPage.jsx (C.card, C.cardBdr …)
+ * • Font: Inter (UI)  ·  JetBrains Mono (price numerics)
+ */
 import { useState, useEffect, useRef, useCallback } from "react";
-import { motion, AnimatePresence } from "framer-motion";
-import { useWebSocket } from "../hooks/useWebSocket";
-import SparklineChart from "../components/charts/SparklineChart";
-import AssetDetailDrawer from "../components/markets/AssetDetailDrawer";
-import api from "../utils/api";
+import { motion, AnimatePresence }  from "framer-motion";
+import { createChart }              from "lightweight-charts";
+import { useWebSocket }             from "../hooks/useWebSocket";
+import api                          from "../utils/api";
 
-const INSTRUMENT_META = {
-  // ── Forex majors ────────────────────────────────────────────────────────────
-  EUR_USD:    { label: "EUR/USD",  base: "EUR", quote: "USD", flag: "🇪🇺/🇺🇸", category: "Forex",   decimals: 5 },
-  GBP_USD:    { label: "GBP/USD",  base: "GBP", quote: "USD", flag: "🇬🇧/🇺🇸", category: "Forex",   decimals: 5 },
-  USD_JPY:    { label: "USD/JPY",  base: "USD", quote: "JPY", flag: "🇺🇸/🇯🇵", category: "Forex",   decimals: 3 },
-  AUD_USD:    { label: "AUD/USD",  base: "AUD", quote: "USD", flag: "🇦🇺/🇺🇸", category: "Forex",   decimals: 5 },
-  NZD_USD:    { label: "NZD/USD",  base: "NZD", quote: "USD", flag: "🇳🇿/🇺🇸", category: "Forex",   decimals: 5 },
-  USD_CAD:    { label: "USD/CAD",  base: "USD", quote: "CAD", flag: "🇺🇸/🇨🇦", category: "Forex",   decimals: 5 },
-  USD_CHF:    { label: "USD/CHF",  base: "USD", quote: "CHF", flag: "🇺🇸/🇨🇭", category: "Forex",   decimals: 5 },
-  // ── Metals ──────────────────────────────────────────────────────────────────
-  XAU_USD:    { label: "XAU/USD",  base: "XAU", quote: "USD", flag: "🥇/🇺🇸",  category: "Metals",  decimals: 2 },
-  // ── Indices ─────────────────────────────────────────────────────────────────
-  NAS100_USD: { label: "NAS100",   base: "NAS", quote: "USD", flag: "📈/🇺🇸", category: "Indices", decimals: 1 },
-  US30_USD:   { label: "US30",     base: "US",  quote: "USD", flag: "🏛️/🇺🇸", category: "Indices", decimals: 1 },
-  SPX500_USD: { label: "SPX500",   base: "SPX", quote: "USD", flag: "📊/🇺🇸", category: "Indices", decimals: 1 },
-  GER30_EUR:  { label: "GER30",    base: "GER", quote: "EUR", flag: "🇩🇪/📊",  category: "Indices", decimals: 1 },
-  UK100_GBP:  { label: "UK100",    base: "UK",  quote: "GBP", flag: "🇬🇧/📊",  category: "Indices", decimals: 1 },
-  J225_USD:   { label: "J225",     base: "JP",  quote: "USD", flag: "🇯🇵/📊",  category: "Indices", decimals: 0 },
-  // ── Crypto ──────────────────────────────────────────────────────────────────
-  BTC_USD:    { label: "BTC/USD",  base: "BTC", quote: "USD", flag: "₿/🇺🇸",  category: "Crypto",  decimals: 1 },
+// ── Design tokens (mirrors AccountPage exactly) ───────────────────────────────
+const C = {
+  green:    "#00FF41",
+  greenDim: "rgba(0,255,65,0.12)",
+  greenBdr: "rgba(0,255,65,0.25)",
+  red:      "#FF3A3A",
+  amber:    "#FFB800",
+  white:    "#ffffff",
+  label:    "#aaaaaa",
+  sub:      "#666666",
+  card:     "#0f0f0f",
+  cardBdr:  "rgba(255,255,255,0.07)",
+  sheet:    "#141414",
 };
 
-const FILTER_CATEGORIES = ["All", "Forex", "Metals", "Indices", "Crypto"];
+const FONT_UI   = "'Inter', sans-serif";
+const FONT_MONO = "'JetBrains Mono', monospace";
 
+// ── Instrument metadata ────────────────────────────────────────────────────────
+const INSTRUMENT_META = {
+  EUR_USD:    { label: "EUR/USD",  flag: "🇪🇺", category: "Forex",   decimals: 5 },
+  GBP_USD:    { label: "GBP/USD",  flag: "🇬🇧", category: "Forex",   decimals: 5 },
+  USD_JPY:    { label: "USD/JPY",  flag: "🇺🇸", category: "Forex",   decimals: 3 },
+  AUD_USD:    { label: "AUD/USD",  flag: "🇦🇺", category: "Forex",   decimals: 5 },
+  NZD_USD:    { label: "NZD/USD",  flag: "🇳🇿", category: "Forex",   decimals: 5 },
+  USD_CAD:    { label: "USD/CAD",  flag: "🇨🇦", category: "Forex",   decimals: 5 },
+  USD_CHF:    { label: "USD/CHF",  flag: "🇨🇭", category: "Forex",   decimals: 5 },
+  XAU_USD:    { label: "XAU/USD",  flag: "🥇", category: "Metals",  decimals: 2 },
+  NAS100_USD: { label: "NAS100",   flag: "📈", category: "Indices", decimals: 1 },
+  US30_USD:   { label: "US30",     flag: "🏛️", category: "Indices", decimals: 1 },
+  SPX500_USD: { label: "SPX500",   flag: "📊", category: "Indices", decimals: 1 },
+  GER30_EUR:  { label: "GER30",    flag: "🇩🇪", category: "Indices", decimals: 1 },
+  UK100_GBP:  { label: "UK100",    flag: "🇬🇧", category: "Indices", decimals: 1 },
+  J225_USD:   { label: "J225",     flag: "🇯🇵", category: "Indices", decimals: 0 },
+  BTC_USD:    { label: "BTC/USD",  flag: "₿",  category: "Crypto",  decimals: 1 },
+};
+
+const CATEGORIES = ["All", "Forex", "Metals", "Indices", "Crypto"];
+
+// ═════════════════════════════════════════════════════════════════════════════
 export default function MarketsPage() {
-  const [prices, setPrices]       = useState({});
-  const [prevPrices, setPrev]     = useState({});
-  const [flickerState, setFlicker] = useState({});
-  const [analysis, setAnalysis]   = useState({});
-  const [selectedAsset, setSelected] = useState(null);
-  const [filter, setFilter]       = useState("All");
-  const [search, setSearch]       = useState("");
+  const [prices,       setPrices]    = useState({});
+  const [flickerState, setFlicker]   = useState({});
+  const [analysis,     setAnalysis]  = useState({});
+  const [openIns,      setOpenIns]   = useState(null);   // accordion state
+  const [filter,       setFilter]    = useState("All");
+  const [search,       setSearch]    = useState("");
   const tickerRef = useRef({});
 
-  // WebSocket for live ticks
-  // WebSocket — Clerk token fetched internally
   const { lastMessage, send } = useWebSocket();
 
-  // When the user selects an instrument, immediately request the latest price
-  // from the backend rather than waiting for the next Oanda tick (which could
-  // be several seconds away for less-liquid instruments).
+  // Subscribe for immediate price when accordion opens
   useEffect(() => {
-    if (selectedAsset) {
-      send({ type: "SUBSCRIBE", instrument: selectedAsset });
-    }
-  }, [selectedAsset, send]);
+    if (openIns) send({ type: "SUBSCRIBE", instrument: openIns });
+  }, [openIns, send]);
 
+  // Handle WS messages
   useEffect(() => {
     if (!lastMessage) return;
     const msg = lastMessage;
-
     if (msg.type === "TICK") {
       const { instrument, mid } = msg;
-      setPrev((prev) => ({ ...prev, [instrument]: prices[instrument] }));
-      setPrices((prev) => {
+      setPrices(prev => {
         const prevPrice = prev[instrument];
         if (prevPrice !== undefined && mid !== prevPrice) {
           const dir = mid > prevPrice ? "up" : "down";
-          setFlicker((f) => ({ ...f, [instrument]: dir }));
-          // Clear flicker after animation
+          setFlicker(f => ({ ...f, [instrument]: dir }));
           clearTimeout(tickerRef.current[instrument]);
-          tickerRef.current[instrument] = setTimeout(() => {
-            setFlicker((f) => ({ ...f, [instrument]: null }));
-          }, 450);
+          tickerRef.current[instrument] = setTimeout(() =>
+            setFlicker(f => ({ ...f, [instrument]: null })), 450);
         }
         return { ...prev, [instrument]: mid };
       });
     }
-
-    if (msg.type === "SNAPSHOT") {
-      setPrices(msg.prices || {});
-    }
+    if (msg.type === "SNAPSHOT") setPrices(msg.prices || {});
   }, [lastMessage]);
 
-  // Fetch analysis states periodically
+  // Periodic SMC analysis
   useEffect(() => {
-    const fetchAnalysis = async () => {
-      const instruments = Object.keys(INSTRUMENT_META);
-      const results = await Promise.allSettled(
-        instruments.map((ins) => api.get(`/markets/${ins}/analysis`))
-      );
-      const merged = {};
-      instruments.forEach((ins, i) => {
-        if (results[i].status === "fulfilled") {
-          merged[ins] = results[i].value.data;
-        }
+    const fetch = async () => {
+      const keys    = Object.keys(INSTRUMENT_META);
+      const results = await Promise.allSettled(keys.map(k => api.get(`/markets/${k}/analysis`)));
+      const merged  = {};
+      keys.forEach((k, i) => {
+        if (results[i].status === "fulfilled") merged[k] = results[i].value.data;
       });
       setAnalysis(merged);
     };
-    fetchAnalysis();
-    const id = setInterval(fetchAnalysis, 30_000);
+    fetch();
+    const id = setInterval(fetch, 30_000);
     return () => clearInterval(id);
   }, []);
 
   const filtered = Object.entries(INSTRUMENT_META).filter(([key, meta]) => {
-    const categoryMatch = filter === "All" || meta.category === filter;
-    const searchMatch   = meta.label.toLowerCase().includes(search.toLowerCase());
-    return categoryMatch && searchMatch;
+    const catOk  = filter === "All" || meta.category === filter;
+    const srchOk = meta.label.toLowerCase().includes(search.toLowerCase());
+    return catOk && srchOk;
   });
 
+  const handleRowClick = useCallback((ins) => {
+    setOpenIns(prev => prev === ins ? null : ins);
+  }, []);
+
   return (
-    <div className="pb-4" style={{ fontFamily: "'DM Sans', sans-serif" }}>
-      {/* Header */}
-      <div
-        className="sticky top-0 z-30 px-4 pt-4 pb-3"
-        style={{
-          background: "rgba(5,5,5,0.95)",
-          backdropFilter: "blur(20px)",
-          borderBottom: "1px solid rgba(0,255,65,0.06)",
-        }}
-      >
-        <div className="flex items-center justify-between mb-3">
+    <div style={{ fontFamily: FONT_UI, color: C.white, minHeight: "100%" }}>
+
+      {/* ── Sticky header ─────────────────────────────────────────────────── */}
+      <div style={{
+        position:       "sticky",
+        top:            0,
+        zIndex:         20,
+        padding:        "16px 16px 12px",
+        background:     "rgba(5,5,5,0.97)",
+        backdropFilter: "blur(20px)",
+        WebkitBackdropFilter: "blur(20px)",
+        borderBottom:   "1px solid rgba(0,255,65,0.08)",
+      }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
           <div>
-            <h1 className="text-xl font-display text-white tracking-wide">Markets</h1>
-            <p style={{ color: "#aaaaaa", fontSize: "0.72rem", marginTop: 2 }}>
+            <h1 style={{ color: C.white, fontSize: "1.2rem", fontWeight: 700, letterSpacing: "0.03em", margin: 0 }}>
+              Markets
+            </h1>
+            <p style={{ color: C.label, fontSize: "0.7rem", margin: "2px 0 0" }}>
               {Object.keys(prices).length} live instruments
             </p>
           </div>
           {/* Live indicator */}
-          <div className="flex items-center gap-2 px-3 py-1.5 rounded-full" style={{ background: "rgba(0,255,65,0.08)", border: "1px solid rgba(0,255,65,0.15)" }}>
+          <div style={{
+            display: "flex", alignItems: "center", gap: 6,
+            padding: "6px 12px", borderRadius: 99,
+            background: C.greenDim, border: `1px solid rgba(0,255,65,0.18)`,
+          }}>
             <motion.div
-              className="w-1.5 h-1.5 rounded-full bg-radiant-500"
-              animate={{ opacity: [1, 0.3, 1] }}
-              transition={{ duration: 1.5, repeat: Infinity }}
+              animate={{ opacity: [1, 0.25, 1] }}
+              transition={{ duration: 1.4, repeat: Infinity }}
+              style={{ width: 6, height: 6, borderRadius: "50%", background: C.green }}
             />
-            <span className="text-radiant-500 text-xs font-display tracking-wider">LIVE</span>
+            <span style={{ color: C.green, fontSize: "0.65rem", fontWeight: 700, letterSpacing: "0.1em" }}>LIVE</span>
           </div>
         </div>
 
-        {/* Search bar */}
-        <div
-          className="flex items-center gap-2 px-3 py-2.5 rounded-xl mb-3"
-          style={{ background: "#141414", border: "1px solid rgba(255,255,255,0.05)" }}
-        >
-          <SearchIcon />
+        {/* Search */}
+        <div style={{
+          display: "flex", alignItems: "center", gap: 8,
+          padding: "9px 12px", borderRadius: 12, marginBottom: 10,
+          background: C.sheet, border: `1px solid ${C.cardBdr}`,
+        }}>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={C.sub} strokeWidth="2">
+            <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+          </svg>
           <input
             type="text"
             value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search instruments..."
-            className="flex-1 bg-transparent outline-none" style={{ fontSize: "0.875rem", color: "#ffffff" }}
+            onChange={e => setSearch(e.target.value)}
+            placeholder="Search instruments…"
+            style={{
+              flex: 1, background: "transparent", border: "none", outline: "none",
+              fontSize: "0.82rem", color: C.white, fontFamily: FONT_UI,
+            }}
           />
         </div>
 
         {/* Category filter pills */}
-        <div className="flex gap-2 overflow-x-auto scrollbar-none pb-1">
-          {FILTER_CATEGORIES.map((cat) => (
-            <motion.button
-              key={cat}
-              whileTap={{ scale: 0.95 }}
-              onClick={() => setFilter(cat)}
-              className="flex-shrink-0 px-4 py-1.5 rounded-full text-xs font-display tracking-wide uppercase transition-all"
-              style={{
-                background: filter === cat ? "rgba(0,255,65,0.12)" : "transparent",
-                border:     `1px solid ${filter === cat ? "rgba(0,255,65,0.35)" : "rgba(255,255,255,0.06)"}`,
-                color:      filter === cat ? "#00FF41" : "#4d4d4d",
-                boxShadow:  filter === cat ? "0 0 12px rgba(0,255,65,0.1)" : "none",
-              }}
-            >
-              {cat}
-            </motion.button>
-          ))}
+        <div style={{ display: "flex", gap: 8, overflowX: "auto", paddingBottom: 2 }}
+          className="scrollbar-none">
+          {CATEGORIES.map(cat => {
+            const active = filter === cat;
+            return (
+              <motion.button
+                key={cat}
+                whileTap={{ scale: 0.95 }}
+                onClick={() => setFilter(cat)}
+                style={{
+                  flexShrink:    0,
+                  padding:       "5px 14px",
+                  borderRadius:  99,
+                  fontSize:      "0.68rem",
+                  fontWeight:    600,
+                  letterSpacing: "0.07em",
+                  textTransform: "uppercase",
+                  cursor:        "pointer",
+                  border:        `1px solid ${active ? C.greenBdr : C.cardBdr}`,
+                  background:    active ? C.greenDim : "transparent",
+                  color:         active ? C.green : C.sub,
+                  boxShadow:     active ? "0 0 10px rgba(0,255,65,0.1)" : "none",
+                  fontFamily:    FONT_UI,
+                }}
+              >
+                {cat}
+              </motion.button>
+            );
+          })}
         </div>
       </div>
 
-      {/* Market List */}
-      <div className="px-4 py-2 space-y-2">
+      {/* ── Instrument list with accordion ────────────────────────────────── */}
+      <div style={{ padding: "12px 16px 32px", display: "flex", flexDirection: "column", gap: 8 }}>
         {filtered.map(([instrument, meta], index) => {
-          const price       = prices[instrument];
-          const prev        = prevPrices[instrument];
-          const flicker     = flickerState[instrument];
-          const analState   = analysis[instrument];
-          const confidence  = analState?.confidence ?? 0;
-          const bias        = analState?.layer1?.bias ?? "NEUTRAL";
+          const price      = prices[instrument];
+          const flicker    = flickerState[instrument];
+          const analState  = analysis[instrument];
+          const confidence = analState?.confidence ?? 0;
+          const bias       = analState?.layer1?.bias ?? "NEUTRAL";
+          const isOpen     = openIns === instrument;
 
           return (
             <motion.div
               key={instrument}
-              initial={{ opacity: 0, y: 16 }}
+              initial={{ opacity: 0, y: 10 }}
               animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: index * 0.05, duration: 0.3, ease: [0.32, 0.72, 0, 1] }}
-              whileTap={{ scale: 0.98 }}
-              onClick={() => setSelected(instrument)}
-              className="relative overflow-hidden rounded-2xl cursor-pointer"
+              transition={{ delay: index * 0.03, duration: 0.22, ease: [0.32, 0.72, 0, 1] }}
               style={{
-                background: "#0f0f0f",
-                border: `1px solid ${confidence === 100 ? "rgba(0,255,65,0.25)" : "rgba(255,255,255,0.05)"}`,
-                boxShadow: confidence === 100 ? "0 0 20px rgba(0,255,65,0.08)" : "none",
+                borderRadius: 16,
+                overflow:     "hidden",
+                background:   C.card,
+                border:       `1px solid ${
+                  isOpen ? C.greenBdr :
+                  confidence === 100 ? "rgba(0,255,65,0.2)" : C.cardBdr
+                }`,
+                boxShadow:    isOpen
+                  ? "0 0 24px rgba(0,255,65,0.07)"
+                  : confidence === 100
+                  ? "0 0 16px rgba(0,255,65,0.05)"
+                  : "none",
               }}
             >
               {/* 100% confidence glow strip */}
               {confidence === 100 && (
-                <div
-                  className="absolute top-0 left-0 right-0 h-[2px]"
-                  style={{
-                    background: "linear-gradient(90deg, transparent, #00FF41, transparent)",
-                    boxShadow: "0 0 8px rgba(0,255,65,0.6)",
-                  }}
-                />
+                <div style={{
+                  height:     2,
+                  background: "linear-gradient(90deg, transparent, #00FF41, transparent)",
+                  boxShadow:  "0 0 8px rgba(0,255,65,0.5)",
+                }} />
               )}
 
-              <div className="flex items-center gap-3 p-4">
-                {/* Flag / symbol */}
-                <div
-                  className="w-11 h-11 rounded-xl flex items-center justify-center text-lg flex-shrink-0"
-                  style={{
-                    background: "rgba(255,255,255,0.04)",
-                    border: "1px solid rgba(255,255,255,0.06)",
-                  }}
-                >
-                  {meta.flag.split("/")[0]}
+              {/* ── Row header (tappable) ──────────────────────────────── */}
+              <motion.div
+                whileTap={{ scale: 0.985 }}
+                onClick={() => handleRowClick(instrument)}
+                style={{
+                  display:    "flex",
+                  alignItems: "center",
+                  gap:        12,
+                  padding:    "14px 14px",
+                  cursor:     "pointer",
+                }}
+              >
+                {/* Flag icon */}
+                <div style={{
+                  width:          44,
+                  height:         44,
+                  borderRadius:   12,
+                  display:        "flex",
+                  alignItems:     "center",
+                  justifyContent: "center",
+                  fontSize:       "1.25rem",
+                  flexShrink:     0,
+                  background:     isOpen ? C.greenDim : "rgba(255,255,255,0.04)",
+                  border:         `1px solid ${isOpen ? C.greenBdr : C.cardBdr}`,
+                  transition:     "background 0.18s, border-color 0.18s",
+                }}>
+                  {meta.flag}
                 </div>
 
-                {/* Name + SMC badge */}
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2">
-                    <span className="text-white text-base font-display tracking-wide">
+                {/* Name + category */}
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ color: C.white, fontSize: "0.95rem", fontWeight: 600, letterSpacing: "0.02em" }}>
                       {meta.label}
                     </span>
-                    {confidence > 0 && (
-                      <ConfidenceBadge confidence={confidence} bias={bias} />
-                    )}
+                    {confidence > 0 && <ConfidenceBadge confidence={confidence} bias={bias} />}
                   </div>
-                  <span style={{ color: "#aaaaaa", fontSize: "0.72rem" }}>{meta.category}</span>
+                  <span style={{ color: C.label, fontSize: "0.7rem" }}>{meta.category}</span>
                 </div>
 
-                {/* Sparkline + price */}
-                <div className="flex flex-col items-end gap-1 flex-shrink-0">
-                  <PriceDisplay
-                    price={price}
-                    decimals={meta.decimals}
-                    flicker={flicker}
-                  />
-                  <SparklineChart instrument={instrument} width={72} height={28} />
+                {/* Price + chevron */}
+                <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4, flexShrink: 0 }}>
+                  <PriceDisplay price={price} decimals={meta.decimals} flicker={flicker} />
+                  <motion.div
+                    animate={{ rotate: isOpen ? 180 : 0 }}
+                    transition={{ duration: 0.2 }}
+                    style={{ color: isOpen ? C.green : C.sub }}
+                  >
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                      <polyline points="6 9 12 15 18 9"/>
+                    </svg>
+                  </motion.div>
                 </div>
-              </div>
+              </motion.div>
 
-              {/* Hover/active shimmer */}
-              <motion.div
-                className="absolute inset-0 pointer-events-none"
-                style={{ background: "radial-gradient(ellipse at center, rgba(0,255,65,0.03) 0%, transparent 70%)" }}
-              />
+              {/* ── Inline accordion chart ──────────────────────────────── */}
+              <AnimatePresence initial={false}>
+                {isOpen && (
+                  <motion.div
+                    initial={{ height: 0, opacity: 0 }}
+                    animate={{ height: "auto", opacity: 1 }}
+                    exit={{ height: 0, opacity: 0 }}
+                    transition={{ duration: 0.25, ease: [0.32, 0.72, 0, 1] }}
+                    style={{ overflow: "hidden" }}
+                  >
+                    <div style={{
+                      margin:       "0 14px 14px",
+                      borderRadius: 12,
+                      overflow:     "hidden",
+                      border:       `1px solid rgba(0,255,65,0.12)`,
+                      background:   C.sheet,
+                    }}>
+                      <InlineChart
+                        instrument={instrument}
+                        decimals={meta.decimals}
+                      />
+                      {/* Mini stats bar */}
+                      <InlineStats instrument={instrument} analysis={analState} />
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
             </motion.div>
           );
         })}
       </div>
-
-      {/* Asset detail drawer */}
-      <AnimatePresence>
-        {selectedAsset && (
-          <AssetDetailDrawer
-            instrument={selectedAsset}
-            meta={INSTRUMENT_META[selectedAsset]}
-            price={prices[selectedAsset]}
-            analysis={analysis[selectedAsset]}
-            onClose={() => setSelected(null)}
-          />
-        )}
-      </AnimatePresence>
     </div>
   );
 }
 
-// ── Price Display with flicker animation ──────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+//  InlineChart — LightweightCharts area series for M15 candles
+// ─────────────────────────────────────────────────────────────────────────────
+function InlineChart({ instrument, decimals }) {
+  const containerRef = useRef(null);
+  const chartRef     = useRef(null);
 
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+
+    const chart = createChart(el, {
+      width:  el.clientWidth,
+      height: 156,
+      layout: {
+        background:  { color: "transparent" },
+        textColor:   C.label,
+        fontFamily:  FONT_MONO,
+        fontSize:    10,
+      },
+      grid: {
+        vertLines: { color: "rgba(255,255,255,0.03)" },
+        horzLines: { color: "rgba(255,255,255,0.03)" },
+      },
+      rightPriceScale: {
+        borderColor: C.cardBdr,
+        textColor:   C.sub,
+      },
+      timeScale: {
+        borderColor:       C.cardBdr,
+        textColor:         C.sub,
+        timeVisible:       true,
+        secondsVisible:    false,
+        fixLeftEdge:       true,
+        fixRightEdge:      true,
+      },
+      crosshair: {
+        vertLine: { color: "rgba(0,255,65,0.35)", labelBackgroundColor: "#0f0f0f" },
+        horzLine: { color: "rgba(0,255,65,0.35)", labelBackgroundColor: "#0f0f0f" },
+      },
+      handleScroll: { mouseWheel: false, pressedMouseMove: true, horzTouchDrag: true },
+      handleScale:  { mouseWheel: false, pinch: true },
+    });
+
+    const series = chart.addAreaSeries({
+      lineColor:   C.green,
+      topColor:    "rgba(0,255,65,0.18)",
+      bottomColor: "rgba(0,255,65,0.0)",
+      lineWidth:   2,
+      crosshairMarkerRadius:        4,
+      crosshairMarkerBorderColor:   C.green,
+      crosshairMarkerBackgroundColor: "#000",
+      priceFormat: {
+        type:     "price",
+        precision: decimals,
+        minMove:   1 / Math.pow(10, decimals),
+      },
+    });
+
+    chartRef.current = chart;
+
+    // Fetch M15 candles
+    api.get(`/markets/${instrument}/candles?granularity=M15`)
+      .then(({ data }) => {
+        const formatted = data
+          .map(c => ({ time: c.t, value: c.c }))
+          .sort((a, b) => a.time - b.time);
+        if (formatted.length > 1) {
+          series.setData(formatted);
+          chart.timeScale().fitContent();
+        }
+      })
+      .catch(() => {});
+
+    // Resize observer
+    const ro = new ResizeObserver(() => {
+      if (el.clientWidth > 0) chart.applyOptions({ width: el.clientWidth });
+    });
+    ro.observe(el);
+
+    return () => {
+      ro.disconnect();
+      chart.remove();
+      chartRef.current = null;
+    };
+  }, [instrument, decimals]);
+
+  return <div ref={containerRef} style={{ width: "100%", height: 156 }} />;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  InlineStats — mini stat row shown below chart in accordion
+// ─────────────────────────────────────────────────────────────────────────────
+function InlineStats({ instrument, analysis }) {
+  if (!analysis) return null;
+  const conf  = analysis.confidence ?? 0;
+  const bias  = analysis.layer1?.bias ?? "NEUTRAL";
+  const l2    = analysis.layer2?.active ? "✓ OB/FVG" : "—";
+  const l3    = analysis.layer3?.mss    ? "✓ MSS"    : "—";
+  const color = bias === "BULLISH" ? C.green : bias === "BEARISH" ? C.red : C.sub;
+
+  return (
+    <div style={{
+      display:             "grid",
+      gridTemplateColumns: "repeat(4,1fr)",
+      gap:                 1,
+      borderTop:           `1px solid ${C.cardBdr}`,
+    }}>
+      {[
+        { label: "Confidence", value: `${conf}%`,  accent: conf === 100 },
+        { label: "Bias",       value: bias,          accent: bias !== "NEUTRAL" },
+        { label: "L2 Zone",   value: l2 },
+        { label: "L3 MSS",    value: l3 },
+      ].map(({ label, value, accent }) => (
+        <div key={label} style={{
+          padding:   "8px 6px",
+          textAlign: "center",
+          background: "transparent",
+        }}>
+          <p style={{ color: C.sub, fontSize: "0.55rem", letterSpacing: "0.1em", margin: "0 0 3px", textTransform: "uppercase" }}>
+            {label}
+          </p>
+          <p style={{
+            color:      accent ? C.green : C.label,
+            fontSize:   "0.68rem",
+            fontWeight: 600,
+            fontFamily: FONT_MONO,
+            margin:     0,
+            textShadow: accent ? "0 0 6px rgba(0,255,65,0.5)" : "none",
+          }}>
+            {value}
+          </p>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  PriceDisplay — animated flicker on tick change
+// ─────────────────────────────────────────────────────────────────────────────
 function PriceDisplay({ price, decimals, flicker }) {
-  const color = flicker === "up" ? "#00FF41" : flicker === "down" ? "#FF3A3A" : "#e0e0e0";
+  const color = flicker === "up" ? C.green : flicker === "down" ? C.red : "#d0d0d0";
   const glow  = flicker === "up"
     ? "0 0 10px rgba(0,255,65,0.7)"
     : flicker === "down"
@@ -282,42 +491,44 @@ function PriceDisplay({ price, decimals, flicker }) {
     <motion.span
       animate={{ color, textShadow: glow }}
       transition={{ duration: 0.08 }}
-      className="text-right font-mono text-sm font-semibold"
-      style={{ fontFamily: "'JetBrains Mono', monospace" }}
+      style={{
+        fontSize:   "0.9rem",
+        fontWeight: 600,
+        fontFamily: FONT_MONO,
+        textAlign:  "right",
+      }}
     >
       {price !== undefined ? price.toFixed(decimals) : "—"}
     </motion.span>
   );
 }
 
-// ── Confidence Badge ──────────────────────────────────────────────────────────
-
-function ConfidenceBadge({ confidence, bias }) {
+// ─────────────────────────────────────────────────────────────────────────────
+//  ConfidenceBadge
+// ─────────────────────────────────────────────────────────────────────────────
+function ConfidenceBadge({ confidence }) {
   const isFull = confidence === 100;
-  const color  = isFull ? "#00FF41" : confidence >= 67 ? "#FFB800" : "#FF3A3A";
+  const color  = isFull ? C.green : confidence >= 67 ? C.amber : C.red;
 
   return (
     <motion.span
-      animate={isFull ? { boxShadow: ["0 0 6px rgba(0,255,65,0.3)", "0 0 14px rgba(0,255,65,0.7)", "0 0 6px rgba(0,255,65,0.3)"] } : {}}
-      transition={{ duration: 1.5, repeat: Infinity }}
-      className="px-1.5 py-0.5 rounded-md text-[10px] font-display tracking-wider"
+      animate={isFull
+        ? { boxShadow: ["0 0 5px rgba(0,255,65,0.25)", "0 0 12px rgba(0,255,65,0.65)", "0 0 5px rgba(0,255,65,0.25)"] }
+        : {}}
+      transition={{ duration: 1.6, repeat: Infinity }}
       style={{
-        background: `${color}18`,
-        border: `1px solid ${color}40`,
+        padding:       "2px 7px",
+        borderRadius:  6,
+        fontSize:      "0.6rem",
+        fontWeight:    700,
+        letterSpacing: "0.08em",
+        background:    `${color}18`,
+        border:        `1px solid ${color}40`,
         color,
+        fontFamily:    FONT_MONO,
       }}
     >
       {confidence}%
     </motion.span>
-  );
-}
-
-// ── Icons ─────────────────────────────────────────────────────────────────────
-
-function SearchIcon() {
-  return (
-    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#404040" strokeWidth="2">
-      <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
-    </svg>
   );
 }

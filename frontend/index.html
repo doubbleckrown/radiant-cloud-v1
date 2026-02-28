@@ -8,12 +8,12 @@
   <meta name="theme-color" content="#050505" />
   <title>FX Radiant</title>
 
-  <!-- Fonts -->
+  <!-- Fonts: Inter (UI) + JetBrains Mono (prices/numbers) -->
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=DM+Sans:wght@300;400;500;600&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet" />
 
-  <!-- Safe area styles -->
+  <!-- Safe area + global reset -->
   <style>
     :root {
       --sat: env(safe-area-inset-top);
@@ -21,16 +21,16 @@
       --sal: env(safe-area-inset-left);
       --sar: env(safe-area-inset-right);
     }
-    * { -webkit-tap-highlight-color: transparent; }
+    * { -webkit-tap-highlight-color: transparent; box-sizing: border-box; }
     html, body, #root {
       height: 100%;
-      width:  100%;
+      width: 100%;
       margin: 0;
       padding: 0;
       background: #050505;
       overflow: hidden;
+      font-family: 'Inter', sans-serif;
     }
-    /* Scrollbar styling */
     ::-webkit-scrollbar { width: 0; background: transparent; }
     .scrollbar-none { scrollbar-width: none; }
     .scrollbar-none::-webkit-scrollbar { display: none; }

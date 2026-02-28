@@ -3,27 +3,15 @@
 @tailwind utilities;
 
 @layer base {
-  /*
-   * Scrollability contract
-   * ──────────────────────
-   * The outer App shell uses an `overflow-y-auto` inner div as the scroll
-   * container (see App.jsx).  Setting `overflow-y: auto` on html/body/root
-   * ensures no ancestor ever clips it, which is required on:
-   *   • Android WebView (Capacitor) — clips on 'hidden' even when the child
-   *     sets its own overflow
-   *   • Safari iOS — same issue
-   *
-   * We do NOT use `overflow: hidden` anywhere in the base layer.
-   */
   html {
-    overscroll-behavior: none;    /* disable pull-to-refresh / bounce */
+    overscroll-behavior: none;
     overflow-y: auto !important;
     height: 100%;
   }
 
   body {
     @apply bg-void text-white;
-    font-family: 'DM Sans', sans-serif;
+    font-family: 'Inter', sans-serif;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
     overflow-y: auto !important;
@@ -31,64 +19,46 @@
     margin: 0;
   }
 
-  /* Vite/React root — must not clip the App shell */
   #root {
     overflow-y: auto !important;
     height: 100%;
   }
-}
 
-/* ── Global text-on-dark safety net ────────────────────────────────────────
- * Vercel's build may bundle CSS that causes Tailwind utility classes to
- * resolve differently from local dev (different purge results, SSR, etc.).
- * These rules enforce readable contrast across ALL environments.
- * They only apply to elements that have NOT been given an explicit color.
- */
-@layer base {
-  /* Default text colour for anything not explicitly set */
+  /* Global text-on-dark safety net */
   h1, h2, h3, h4, h5, h6 { color: #ffffff; }
   p, span, div, li, td, th, label, button { color: inherit; }
-
-  /* Ensure inputs are readable */
   input, textarea, select {
     color: #ffffff;
     background-color: transparent;
   }
-  input::placeholder, textarea::placeholder { color: #666666; }
+  input::placeholder, textarea::placeholder { color: #555555; }
 }
 
 @layer utilities {
-  /* Neon text glow utility */
   .text-glow-green {
-    text-shadow: 0 0 10px rgba(0, 255, 65, 0.7), 0 0 20px rgba(0, 255, 65, 0.3);
+    text-shadow: 0 0 10px rgba(0,255,65,0.7), 0 0 20px rgba(0,255,65,0.3);
   }
-
   .text-glow-red {
-    text-shadow: 0 0 10px rgba(255, 58, 58, 0.7), 0 0 20px rgba(255, 58, 58, 0.3);
+    text-shadow: 0 0 10px rgba(255,58,58,0.7), 0 0 20px rgba(255,58,58,0.3);
   }
-
-  /* Border neon glow */
   .border-glow-green {
-    box-shadow: 0 0 0 1px rgba(0, 255, 65, 0.4),
-                0 0 16px rgba(0, 255, 65, 0.12);
+    box-shadow: 0 0 0 1px rgba(0,255,65,0.4), 0 0 16px rgba(0,255,65,0.12);
   }
-
-  /* OLED safe background */
   .bg-oled {
     background-color: #050505;
   }
-
-  /* Native-feel active state */
   .active-scale {
     @apply active:scale-[0.97] transition-transform duration-100;
   }
-
-  /* Hide scrollbar track but keep scrollability */
   .scrollbar-none {
     -ms-overflow-style: none;
     scrollbar-width: none;
   }
   .scrollbar-none::-webkit-scrollbar {
     display: none;
+  }
+  /* JetBrains Mono shorthand for price numerics */
+  .font-mono-price {
+    font-family: 'JetBrains Mono', monospace;
   }
 }
