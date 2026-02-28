@@ -53,7 +53,7 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from jose import JWTError, jwt
-from passlib.context import CryptContext
+import bcrypt as _bcrypt
 from pydantic import BaseModel
 
 from app.services.strategy import Candle, SMCConfluenceEngine, TradeSignal
@@ -142,16 +142,17 @@ _engines: dict[str, SMCConfluenceEngine] = {
 #  Auth helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-pwd_ctx        = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme  = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 
 
 def hash_password(plain: str) -> str:
-    return pwd_ctx.hash(plain)
+    # Use bcrypt directly — passlib 1.7.4 is incompatible with bcrypt 4.x
+    # (bcrypt 4.0 removed __about__ which passlib reads on every hash call)
+    return _bcrypt.hashpw(plain.encode("utf-8"), _bcrypt.gensalt()).decode("utf-8")
 
 
 def verify_password(plain: str, hashed: str) -> bool:
-    return pwd_ctx.verify(plain, hashed)
+    return _bcrypt.checkpw(plain.encode("utf-8"), hashed.encode("utf-8"))
 
 
 def create_token(data: dict, expires_delta: timedelta) -> str:
