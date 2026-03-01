@@ -772,128 +772,115 @@ function HistoryTab({ history, loading, error, onRetry }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  TradeDetailCard — expanded accordion panel for Open Trades + History
+//  TradeDetailCard — compact accordion panel · mobile-first
 //
-//  Layout (top → bottom):
-//   1. Confluence banner   — SMC reason, direction icon, layer badges
-//   2. P&L hero            — large number, win/loss tint bar
-//   3. Core trade metrics  — 3-col: Units · Entry · Risk/Margin
-//   4. Execution details   — 3-col: SL · TP · Close px (context-dependent)
-//   5. Timestamp section   — full date+time for open; close + duration for history
-//
-//  Field sourcing from Oanda v20:
-//   Open trades  → price · currentUnits · unrealizedPL · marginUsed
-//                   stopLossOrder.price · takeProfitOrder.price · financing
-//   History      → price · averageClosePrice · initialUnits · realizedPL
-//                   financing · commission · openTime · closeTime
+//  5 sections, all with tight padding so the card stays readable without
+//  requiring the user to scroll past it on a phone screen:
+//   1. Confluence banner  (icon · reason · badges)
+//   2. P&L hero           (large number, tinted background)
+//   3. Core metrics row   (Units · Entry · Risk)  — 3-col grid
+//   4. Execution row      (SL · TP · Close/Live)  — 3-col grid
+//   5. Timestamps         (Opened + Closed + duration pill + trade ID)
 // ─────────────────────────────────────────────────────────────────────────────
 function TradeDetailCard({ trade: t, kind }) {
   const isHistory = kind === "history";
 
-  // ── Direction ───────────────────────────────────────────────────────────────
+  // Direction
   const rawUnits = parseInt(
     isHistory ? (t.initialUnits ?? 0) : (t.currentUnits ?? t.initialUnits ?? 0)
   );
-  const isLong = rawUnits > 0;
-  const units  = Math.abs(rawUnits);
+  const isLong   = rawUnits > 0;
+  const units    = Math.abs(rawUnits);
   const dirColor = isLong ? C.green : C.red;
 
-  // ── P&L ─────────────────────────────────────────────────────────────────────
+  // P&L
   const pnl      = parseFloat(isHistory ? (t.realizedPL ?? 0) : (t.unrealizedPL ?? 0));
   const pnlColor = pnl >= 0 ? C.green : C.red;
   const pnlLabel = isHistory ? "Realized P&L" : "Unrealized P&L";
   const pnlSign  = pnl >= 0 ? "+" : "";
 
-  // ── Prices ──────────────────────────────────────────────────────────────────
-  const entryPx     = parseFloat(t.price ?? 0);
-  const closePx     = parseFloat(t.averageClosePrice ?? 0);   // history only
-  const slPx        = parseFloat(t.stopLossOrder?.price    ?? t.stopLossOrderID   ?? 0);
-  const tpPx        = parseFloat(t.takeProfitOrder?.price  ?? t.takeProfitOrderID ?? 0);
+  // Prices
+  const entryPx = parseFloat(t.price ?? 0);
+  const closePx = parseFloat(t.averageClosePrice ?? 0);
+  const slPx    = parseFloat(t.stopLossOrder?.price    ?? t.stopLossOrderID   ?? 0);
+  const tpPx    = parseFloat(t.takeProfitOrder?.price  ?? t.takeProfitOrderID ?? 0);
 
-  // ── Risk ────────────────────────────────────────────────────────────────────
-  const margin      = parseFloat(t.marginUsed   ?? 0);
-  const financing   = parseFloat(t.financing    ?? 0);
-  const commission  = parseFloat(t.commission   ?? 0);
-  // For open trades, margin is the risk proxy.
-  // For closed trades, fees+financing is the total cost of carry.
-  const riskAmt     = isHistory ? Math.abs(financing + commission) : margin;
-  const riskLabel   = isHistory ? "Fees & Financing" : "Margin Used";
+  // Risk
+  const margin     = parseFloat(t.marginUsed  ?? 0);
+  const financing  = parseFloat(t.financing   ?? 0);
+  const commission = parseFloat(t.commission  ?? 0);
+  const riskAmt    = isHistory ? Math.abs(financing + commission) : margin;
+  const riskLabel  = isHistory ? "Fees & Fin." : "Margin";
 
-  // ── Confluence (derived from direction — Oanda doesn't store signal reason) ─
-  const conflTitle = isLong ? "SMC Bullish Order Block"  : "SMC Bearish Order Block";
+  // Confluence labels
+  const conflTitle = isLong ? "SMC Bullish Order Block" : "SMC Bearish Order Block";
   const conflSub   = isLong
     ? "Demand Zone · Above 200 EMA · CHoCH confirmed"
     : "Supply Zone · Below 200 EMA · CHoCH confirmed";
 
-  // ── Timestamps ───────────────────────────────────────────────────────────────
-  const openDt    = t.openTime  ? new Date(t.openTime)  : null;
-  const closeDt   = t.closeTime ? new Date(t.closeTime) : null;
+  // Timestamps
+  const openDt     = t.openTime  ? new Date(t.openTime)  : null;
+  const closeDt    = t.closeTime ? new Date(t.closeTime) : null;
   const durationMs = openDt && closeDt ? closeDt - openDt : null;
 
-  // Format helpers — verbose date + time, separate for legibility
-  const fmtDate = (d) =>
-    d ? d.toLocaleDateString(undefined, { weekday: "short", year: "numeric", month: "short", day: "numeric" }) : "—";
-  const fmtTime = (d) =>
-    d ? d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "—";
+  // Compact date+time on one line: "28 Oct 24 · 14:32"
+  const fmtStamp = (d) => d
+    ? d.toLocaleDateString(undefined, { day: "2-digit", month: "short", year: "2-digit" }) +
+      " · " +
+      d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })
+    : "—";
 
-  // Decimal precision derived from entry price magnitude
-  const decimals = entryPx > 100 ? (entryPx > 1000 ? 1 : 2) : 5;
-  const fmt = (n) => n > 0 ? n.toFixed(decimals) : "—";
+  // Price precision
+  const dec = entryPx > 1000 ? 1 : entryPx > 100 ? 2 : 5;
+  const fmt = (n) => n > 0 ? n.toFixed(dec) : "—";
 
   return (
     <div style={{
-      margin:     "0 12px 14px",
-      borderRadius: 14,
-      overflow:   "hidden",
-      border:     `1px solid ${isLong ? "rgba(0,255,65,0.18)" : "rgba(255,58,58,0.18)"}`,
-      background: C.sheet,
+      margin:       "0 10px 10px",
+      borderRadius: 12,
+      overflow:     "hidden",
+      border:       `1px solid ${isLong ? "rgba(0,255,65,0.18)" : "rgba(255,58,58,0.18)"}`,
+      background:   C.sheet,
     }}>
 
-      {/* ══ 1. CONFLUENCE BANNER ═══════════════════════════════════════════════ */}
+      {/* ── 1. CONFLUENCE BANNER ─────────────────────────────────────────── */}
       <div style={{
         display:      "flex",
         alignItems:   "center",
-        gap:          12,
-        padding:      "12px 14px",
+        gap:          10,
+        padding:      "8px 12px",
         borderBottom: `1px solid ${C.cardBdr}`,
         background:   isLong ? "rgba(0,255,65,0.03)" : "rgba(255,58,58,0.03)",
       }}>
-        {/* Direction icon */}
+        {/* Icon */}
         <div style={{
-          width:          42,
-          height:         42,
-          borderRadius:   12,
-          display:        "flex",
-          alignItems:     "center",
-          justifyContent: "center",
-          fontSize:       "1.15rem",
-          flexShrink:     0,
-          background:     isLong ? "rgba(0,255,65,0.1)" : "rgba(255,58,58,0.1)",
-          border:         `1px solid ${isLong ? C.greenBdr : "rgba(255,58,58,0.3)"}`,
-          boxShadow:      `0 0 12px ${isLong ? "rgba(0,255,65,0.12)" : "rgba(255,58,58,0.12)"}`,
+          width: 32, height: 32, borderRadius: 9, flexShrink: 0,
+          display: "flex", alignItems: "center", justifyContent: "center",
+          fontSize: "1rem",
+          background: isLong ? "rgba(0,255,65,0.1)" : "rgba(255,58,58,0.1)",
+          border: `1px solid ${isLong ? C.greenBdr : "rgba(255,58,58,0.3)"}`,
         }}>
           {isLong ? "📈" : "📉"}
         </div>
 
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", marginBottom: 4 }}>
+          {/* Title + badges on one line */}
+          <div style={{ display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap", marginBottom: 2 }}>
             <span style={{
-              color: C.white, fontSize: "0.85rem", fontWeight: 700,
+              color: C.white, fontSize: "0.78rem", fontWeight: 700,
               fontFamily: FONT_UI, letterSpacing: "0.01em",
             }}>
               {conflTitle}
             </span>
-            {/* SMC/ICT badge */}
             <span style={{
-              padding: "1px 7px", borderRadius: 5, fontSize: "0.55rem",
-              fontWeight: 700, letterSpacing: "0.1em",
+              padding: "1px 5px", borderRadius: 4, fontSize: "0.52rem",
+              fontWeight: 700, letterSpacing: "0.08em",
               color: C.amber, background: "rgba(255,184,0,0.1)",
               border: "1px solid rgba(255,184,0,0.28)", fontFamily: FONT_UI,
-            }}>SMC / ICT</span>
-            {/* Direction badge */}
+            }}>SMC/ICT</span>
             <span style={{
-              padding: "1px 7px", borderRadius: 5, fontSize: "0.55rem",
-              fontWeight: 700, letterSpacing: "0.1em",
+              padding: "1px 5px", borderRadius: 4, fontSize: "0.52rem",
+              fontWeight: 700, letterSpacing: "0.08em",
               color: dirColor,
               background: isLong ? "rgba(0,255,65,0.1)" : "rgba(255,58,58,0.1)",
               border: `1px solid ${isLong ? C.greenBdr : "rgba(255,58,58,0.3)"}`,
@@ -902,114 +889,76 @@ function TradeDetailCard({ trade: t, kind }) {
               {isLong ? "▲ LONG" : "▼ SHORT"}
             </span>
           </div>
-          <p style={{ color: C.sub, fontSize: "0.65rem", margin: 0, fontFamily: FONT_UI, lineHeight: 1.4 }}>
+          <p style={{ color: C.sub, fontSize: "0.6rem", margin: 0, fontFamily: FONT_UI, lineHeight: 1.3 }}>
             {conflSub}
           </p>
         </div>
       </div>
 
-      {/* ══ 2. P&L HERO ════════════════════════════════════════════════════════ */}
+      {/* ── 2. P&L HERO ──────────────────────────────────────────────────── */}
       <div style={{
-        padding:    "14px 16px 12px",
+        padding:      "8px 14px 7px",
         borderBottom: `1px solid ${C.cardBdr}`,
-        background: pnl >= 0 ? "rgba(0,255,65,0.03)" : "rgba(255,58,58,0.03)",
-        textAlign:  "center",
-        position:   "relative",
-        overflow:   "hidden",
+        background:   pnl >= 0 ? "rgba(0,255,65,0.03)" : "rgba(255,58,58,0.03)",
+        textAlign:    "center",
+        position:     "relative",
+        overflow:     "hidden",
       }}>
-        {/* Subtle background glow orb */}
+        {/* Glow orb */}
         <div style={{
-          position:     "absolute",
-          top:          "50%",
-          left:         "50%",
-          transform:    "translate(-50%,-50%)",
-          width:        120,
-          height:       60,
-          borderRadius: "50%",
-          background:   pnl >= 0 ? "rgba(0,255,65,0.06)" : "rgba(255,58,58,0.06)",
-          filter:       "blur(20px)",
-          pointerEvents: "none",
+          position: "absolute", top: "50%", left: "50%",
+          transform: "translate(-50%,-50%)",
+          width: 100, height: 44, borderRadius: "50%",
+          background: pnl >= 0 ? "rgba(0,255,65,0.07)" : "rgba(255,58,58,0.07)",
+          filter: "blur(16px)", pointerEvents: "none",
         }} />
-
         <p style={{
-          color:      pnlColor,
-          fontSize:   "2rem",
-          fontWeight: 800,
-          fontFamily: FONT_MONO,
-          margin:     0,
-          letterSpacing: "-0.02em",
-          textShadow: `0 0 20px ${pnlColor}60, 0 0 40px ${pnlColor}25`,
-          lineHeight: 1,
-          position:   "relative",
+          color: pnlColor, fontSize: "1.6rem", fontWeight: 800,
+          fontFamily: FONT_MONO, margin: 0, letterSpacing: "-0.02em",
+          textShadow: `0 0 16px ${pnlColor}55`, lineHeight: 1, position: "relative",
         }}>
           {pnlSign}{Math.abs(pnl).toFixed(2)}
         </p>
         <p style={{
-          color:      C.sub,
-          fontSize:   "0.62rem",
-          fontWeight: 600,
-          letterSpacing: "0.12em",
-          textTransform: "uppercase",
-          margin:     "6px 0 0",
-          fontFamily: FONT_UI,
-          position:   "relative",
+          color: C.sub, fontSize: "0.58rem", fontWeight: 600,
+          letterSpacing: "0.12em", textTransform: "uppercase",
+          margin: "3px 0 0", fontFamily: FONT_UI, position: "relative",
         }}>
           {pnlLabel}
         </p>
-        {/* Win / loss colour bar */}
+        {/* Colour bar */}
         <div style={{
-          position:   "absolute",
-          bottom:     0,
-          left:       0,
-          right:      0,
-          height:     2,
+          position: "absolute", bottom: 0, left: 0, right: 0, height: 2,
           background: pnl >= 0
-            ? "linear-gradient(90deg, transparent, #00FF41, transparent)"
-            : "linear-gradient(90deg, transparent, #FF3A3A, transparent)",
+            ? "linear-gradient(90deg,transparent,#00FF41,transparent)"
+            : "linear-gradient(90deg,transparent,#FF3A3A,transparent)",
         }} />
       </div>
 
-      {/* ══ 3. CORE METRICS — Units · Entry · Risk ══════════════════════════════ */}
+      {/* ── 3. CORE METRICS — Units · Entry · Risk ───────────────────────── */}
       <div style={{
-        display:             "grid",
-        gridTemplateColumns: "1fr 1fr 1fr",
-        borderBottom:        `1px solid ${C.cardBdr}`,
+        display: "grid", gridTemplateColumns: "1fr 1fr 1fr",
+        borderBottom: `1px solid ${C.cardBdr}`,
       }}>
         {[
-          {
-            label: "Units Used",
-            value: units.toLocaleString(),
-            color: C.white,
-            icon:  "◈",
-          },
-          {
-            label: "Entry Price",
-            value: fmt(entryPx),
-            color: C.white,
-            icon:  "⤵",
-          },
-          {
-            label: riskLabel,
-            value: riskAmt > 0 ? `$${riskAmt.toFixed(2)}` : "—",
-            color: C.amber,
-            icon:  "⚖",
-          },
+          { label: "Units",       value: units.toLocaleString(),                 color: C.white, icon: "◈" },
+          { label: "Entry",       value: fmt(entryPx),                           color: C.white, icon: "⤵" },
+          { label: riskLabel,     value: riskAmt > 0 ? `$${riskAmt.toFixed(2)}` : "—", color: C.amber, icon: "⚖" },
         ].map(({ label, value, color, icon }, idx) => (
           <div key={label} style={{
-            padding:     "10px 8px",
-            textAlign:   "center",
+            padding: "7px 6px", textAlign: "center",
             borderRight: idx < 2 ? `1px solid ${C.cardBdr}` : "none",
           }}>
             <p style={{
-              color: C.sub, fontSize: "0.52rem", letterSpacing: "0.1em",
-              textTransform: "uppercase", margin: "0 0 5px", fontFamily: FONT_UI,
+              color: C.sub, fontSize: "0.5rem", letterSpacing: "0.08em",
+              textTransform: "uppercase", margin: "0 0 3px", fontFamily: FONT_UI,
             }}>
               {icon} {label}
             </p>
             <p style={{
-              color, fontSize: "0.8rem", fontWeight: 700,
+              color, fontSize: "0.75rem", fontWeight: 700,
               fontFamily: FONT_MONO, margin: 0,
-              textShadow: color !== C.white ? `0 0 8px ${color}40` : "none",
+              textShadow: color !== C.white ? `0 0 6px ${color}40` : "none",
             }}>
               {value}
             </p>
@@ -1017,54 +966,33 @@ function TradeDetailCard({ trade: t, kind }) {
         ))}
       </div>
 
-      {/* ══ 4. EXECUTION DETAILS — SL · TP · Close/Current ═════════════════════ */}
+      {/* ── 4. EXECUTION DETAILS — SL · TP · Close/Live ─────────────────── */}
       <div style={{
-        display:             "grid",
-        gridTemplateColumns: "1fr 1fr 1fr",
-        borderBottom:        `1px solid ${C.cardBdr}`,
+        display: "grid", gridTemplateColumns: "1fr 1fr 1fr",
+        borderBottom: `1px solid ${C.cardBdr}`,
       }}>
         {[
-          {
-            label: "Stop Loss",
-            value: fmt(slPx),
-            color: slPx > 0 ? C.red : C.sub,
-            icon:  "🛑",
-          },
-          {
-            label: "Take Profit",
-            value: tpPx > 0 ? fmt(tpPx) : "—",
-            color: tpPx > 0 ? C.green : C.sub,
-            icon:  "🎯",
-          },
+          { label: "Stop Loss",   value: fmt(slPx),   color: slPx > 0 ? C.red   : C.sub, icon: "🛑" },
+          { label: "Take Profit", value: tpPx > 0 ? fmt(tpPx) : "—",
+                                                       color: tpPx > 0 ? C.green : C.sub, icon: "🎯" },
           isHistory
-            ? {
-                label: "Close Price",
-                value: fmt(closePx),
-                color: C.label,
-                icon:  "⤴",
-              }
-            : {
-                label: "Unrealised",
-                value: `${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}`,
-                color: pnlColor,
-                icon:  "〜",
-              },
+            ? { label: "Close",   value: fmt(closePx), color: C.label, icon: "⤴" }
+            : { label: "Live P&L", value: `${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}`, color: pnlColor, icon: "〜" },
         ].map(({ label, value, color, icon }, idx) => (
           <div key={label} style={{
-            padding:     "10px 8px",
-            textAlign:   "center",
+            padding: "7px 6px", textAlign: "center",
             borderRight: idx < 2 ? `1px solid ${C.cardBdr}` : "none",
           }}>
             <p style={{
-              color: C.sub, fontSize: "0.52rem", letterSpacing: "0.1em",
-              textTransform: "uppercase", margin: "0 0 5px", fontFamily: FONT_UI,
+              color: C.sub, fontSize: "0.5rem", letterSpacing: "0.08em",
+              textTransform: "uppercase", margin: "0 0 3px", fontFamily: FONT_UI,
             }}>
               {icon} {label}
             </p>
             <p style={{
-              color, fontSize: "0.8rem", fontWeight: 700,
+              color, fontSize: "0.75rem", fontWeight: 700,
               fontFamily: FONT_MONO, margin: 0,
-              textShadow: color !== C.label && color !== C.sub ? `0 0 8px ${color}40` : "none",
+              textShadow: color !== C.label && color !== C.sub ? `0 0 6px ${color}40` : "none",
             }}>
               {value}
             </p>
@@ -1072,91 +1000,69 @@ function TradeDetailCard({ trade: t, kind }) {
         ))}
       </div>
 
-      {/* ══ 5. TIMESTAMP SECTION ════════════════════════════════════════════════ */}
-      <div style={{ padding: "12px 14px", display: "flex", flexDirection: "column", gap: 8 }}>
+      {/* ── 5. TIMESTAMPS — compact single-line format ───────────────────── */}
+      <div style={{ padding: "7px 12px 8px", display: "flex", flexDirection: "column", gap: 4 }}>
 
-        {/* Opened row */}
+        {/* Opened */}
         {openDt && (
-          <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
-            <div style={{
-              width: 28, height: 28, borderRadius: 8, flexShrink: 0,
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={{
+              width: 22, height: 22, borderRadius: 6, flexShrink: 0,
               display: "flex", alignItems: "center", justifyContent: "center",
-              fontSize: "0.75rem",
+              fontSize: "0.65rem",
               background: "rgba(255,255,255,0.04)", border: `1px solid ${C.cardBdr}`,
-            }}>
-              📂
-            </div>
-            <div>
-              <p style={{
-                color: C.sub, fontSize: "0.55rem", letterSpacing: "0.1em",
-                textTransform: "uppercase", margin: "0 0 2px", fontFamily: FONT_UI,
-              }}>
+            }}>📂</span>
+            <div style={{ minWidth: 0 }}>
+              <span style={{ color: C.sub, fontSize: "0.52rem", letterSpacing: "0.08em",
+                textTransform: "uppercase", marginRight: 5, fontFamily: FONT_UI }}>
                 Opened
-              </p>
-              <p style={{ color: C.white, fontSize: "0.8rem", fontWeight: 600, margin: 0, fontFamily: FONT_UI }}>
-                {fmtDate(openDt)}
-              </p>
-              <p style={{ color: C.label, fontSize: "0.72rem", margin: "1px 0 0", fontFamily: FONT_MONO, letterSpacing: "0.04em" }}>
-                {fmtTime(openDt)}
-              </p>
+              </span>
+              <span style={{ color: C.label, fontSize: "0.68rem", fontFamily: FONT_MONO }}>
+                {fmtStamp(openDt)}
+              </span>
             </div>
           </div>
         )}
 
-        {/* Closed row (history only) */}
+        {/* Closed (history only) */}
         {isHistory && closeDt && (
-          <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
-            <div style={{
-              width: 28, height: 28, borderRadius: 8, flexShrink: 0,
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={{
+              width: 22, height: 22, borderRadius: 6, flexShrink: 0,
               display: "flex", alignItems: "center", justifyContent: "center",
-              fontSize: "0.75rem",
+              fontSize: "0.65rem",
               background: pnl >= 0 ? "rgba(0,255,65,0.08)" : "rgba(255,58,58,0.08)",
               border: `1px solid ${pnl >= 0 ? C.greenBdr : "rgba(255,58,58,0.25)"}`,
             }}>
               {pnl >= 0 ? "✅" : "🔒"}
-            </div>
-            <div>
-              <p style={{
-                color: C.sub, fontSize: "0.55rem", letterSpacing: "0.1em",
-                textTransform: "uppercase", margin: "0 0 2px", fontFamily: FONT_UI,
-              }}>
+            </span>
+            <div style={{ minWidth: 0 }}>
+              <span style={{ color: C.sub, fontSize: "0.52rem", letterSpacing: "0.08em",
+                textTransform: "uppercase", marginRight: 5, fontFamily: FONT_UI }}>
                 Closed
-              </p>
-              <p style={{ color: C.white, fontSize: "0.8rem", fontWeight: 600, margin: 0, fontFamily: FONT_UI }}>
-                {fmtDate(closeDt)}
-              </p>
-              <p style={{ color: C.label, fontSize: "0.72rem", margin: "1px 0 0", fontFamily: FONT_MONO, letterSpacing: "0.04em" }}>
-                {fmtTime(closeDt)}
-              </p>
+              </span>
+              <span style={{ color: C.label, fontSize: "0.68rem", fontFamily: FONT_MONO }}>
+                {fmtStamp(closeDt)}
+              </span>
             </div>
           </div>
         )}
 
-        {/* Duration pill + Trade ID */}
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 2 }}>
+        {/* Duration pill + Trade ID — same row */}
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 1 }}>
           {durationMs && (
             <span style={{
-              display:      "inline-flex",
-              alignItems:   "center",
-              gap:          5,
-              padding:      "4px 10px",
-              borderRadius: 99,
-              fontSize:     "0.65rem",
-              fontWeight:   600,
-              fontFamily:   FONT_MONO,
-              color:        C.label,
-              background:   "rgba(255,255,255,0.04)",
-              border:       `1px solid ${C.cardBdr}`,
-              letterSpacing: "0.04em",
+              display: "inline-flex", alignItems: "center", gap: 4,
+              padding: "2px 8px", borderRadius: 99,
+              fontSize: "0.6rem", fontWeight: 600, fontFamily: FONT_MONO,
+              color: C.label, background: "rgba(255,255,255,0.04)",
+              border: `1px solid ${C.cardBdr}`, letterSpacing: "0.04em",
             }}>
               ⏱ {formatDuration(durationMs)}
             </span>
           )}
           {t.id && (
-            <span style={{
-              color: C.sub, fontSize: "0.58rem",
-              fontFamily: FONT_MONO, letterSpacing: "0.04em",
-            }}>
+            <span style={{ color: C.sub, fontSize: "0.55rem", fontFamily: FONT_MONO }}>
               ID: {t.id}
             </span>
           )}
@@ -1172,7 +1078,7 @@ function formatDuration(ms) {
   const days    = Math.floor(totalSeconds / 86400);
   const hours   = Math.floor((totalSeconds % 86400) / 3600);
   const minutes = Math.floor((totalSeconds % 3600) / 60);
-  if (days > 0)    return `${days}d ${hours}h ${minutes}m`;
+  if (days > 0)    return `${days}d ${hours}h`;
   if (hours > 0)   return `${hours}h ${minutes}m`;
   if (minutes > 0) return `${minutes}m`;
   return `${totalSeconds}s`;

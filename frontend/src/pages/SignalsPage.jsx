@@ -1,11 +1,14 @@
 /**
  * SignalsPage
  * ══════════════════════════════════════════════════════════════
- * Changes from previous version:
- *   • Push Notification Permission Card — shown until subscribed
- *   • 95%+ confidence detection from WebSocket SIGNAL messages →
- *     fires a local foreground notification AND vibrates the device
- *   • All other styling/layout preserved exactly
+ * Push notifications are now fully automatic — no button or card shown.
+ * usePushNotifications() is called for its side-effect: it inits OneSignal,
+ * requests permission automatically, and registers the player ID with the
+ * backend the moment the user lands on any page after login (App.jsx also
+ * fires initOneSignal() immediately so the handshake starts even earlier).
+ *
+ * 95%+ confidence WebSocket SIGNAL messages still fire a local foreground
+ * notification AND vibrate the device as before.
  *
  * Font: Inter (UI)  ·  JetBrains Mono (price/numeric values)
  */
@@ -40,7 +43,7 @@ const PUSH_THRESHOLD = 95;
 export default function SignalsPage() {
   const [signals, setSignals] = useState([]);
   const { lastMessage }       = useWebSocket();
-  const push                  = usePushNotifications();
+  usePushNotifications();   // auto-subscribes on mount — no manual action needed
 
   // Tracks which signal IDs we've already notified for (prevents duplicates)
   const notifiedRef = useRef(new Set());
@@ -132,9 +135,6 @@ export default function SignalsPage() {
 
       {/* ── Content ───────────────────────────────────────────────────────── */}
       <div style={{ padding: "12px 16px 32px", display: "flex", flexDirection: "column", gap: 10 }}>
-
-        {/* ── Push Permission Card ──────────────────────────────────────── */}
-        <PushPermissionCard push={push} />
 
         {/* ── Empty state ──────────────────────────────────────────────── */}
         {signals.length === 0 && (
@@ -331,142 +331,6 @@ export default function SignalsPage() {
           })}
         </AnimatePresence>
       </div>
-    </div>
-  );
-}
-
-
-// ─────────────────────────────────────────────────────────────────────────────
-//  PushPermissionCard
-//  Shown until the user subscribes. Dismissed automatically once subscribed.
-//  Hides itself (with animation) if push is not supported in this browser.
-// ─────────────────────────────────────────────────────────────────────────────
-function PushPermissionCard({ push }) {
-  const { supported, permission, subscribed, loading, error, subscribe } = push;
-
-  // Nothing to show if: unsupported, already granted+subscribed, or explicitly denied
-  if (!supported)   return null;
-  if (subscribed)   return null;
-  if (permission === "denied") return <PushDeniedHint />;
-
-  return (
-    <AnimatePresence>
-      <motion.div
-        initial={{ opacity: 0, y: -8 }}
-        animate={{ opacity: 1,  y: 0  }}
-        exit={{ opacity: 0, height: 0 }}
-        transition={{ duration: 0.25 }}
-        style={{
-          borderRadius: 16,
-          overflow:     "hidden",
-          background:   C.card,
-          border:       "1px solid rgba(255,184,0,0.22)",
-          boxShadow:    "0 0 20px rgba(255,184,0,0.06)",
-        }}
-      >
-        {/* Amber top bar */}
-        <div style={{
-          height:     2,
-          background: "linear-gradient(90deg, transparent, #FFB800, transparent)",
-        }} />
-
-        <div style={{ padding: "14px 16px" }}>
-          <div style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
-
-            {/* Icon */}
-            <div style={{
-              width:          44,
-              height:         44,
-              borderRadius:   12,
-              display:        "flex",
-              alignItems:     "center",
-              justifyContent: "center",
-              fontSize:       "1.3rem",
-              flexShrink:     0,
-              background:     "rgba(255,184,0,0.08)",
-              border:         "1px solid rgba(255,184,0,0.2)",
-            }}>
-              🔔
-            </div>
-
-            {/* Text */}
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <p style={{ color: C.white, fontSize: "0.88rem", fontWeight: 700, margin: "0 0 4px", fontFamily: FONT_UI }}>
-                Enable Signal Alerts
-              </p>
-              <p style={{ color: C.label, fontSize: "0.72rem", lineHeight: 1.5, margin: 0, fontFamily: FONT_UI }}>
-                Get instant push notifications when the SMC Engine detects a {PUSH_THRESHOLD}%+ confluence setup — even when your screen is off.
-              </p>
-
-              {/* Error message */}
-              {error && (
-                <p style={{ color: C.red, fontSize: "0.68rem", margin: "8px 0 0", fontFamily: FONT_UI }}>
-                  ✕ {error}
-                </p>
-              )}
-
-              {/* CTA button */}
-              <motion.button
-                whileTap={{ scale: 0.97 }}
-                onClick={subscribe}
-                disabled={loading}
-                style={{
-                  marginTop:     12,
-                  padding:       "8px 20px",
-                  borderRadius:  10,
-                  background:    loading ? "rgba(255,184,0,0.08)" : "rgba(255,184,0,0.14)",
-                  border:        "1px solid rgba(255,184,0,0.35)",
-                  color:         C.amber,
-                  fontSize:      "0.75rem",
-                  fontWeight:    700,
-                  letterSpacing: "0.07em",
-                  fontFamily:    FONT_UI,
-                  cursor:        loading ? "not-allowed" : "pointer",
-                  opacity:       loading ? 0.7 : 1,
-                  display:       "flex",
-                  alignItems:    "center",
-                  gap:           8,
-                }}
-              >
-                {loading ? (
-                  <>
-                    <motion.div
-                      animate={{ rotate: 360 }}
-                      transition={{ duration: 0.7, repeat: Infinity, ease: "linear" }}
-                      style={{
-                        width: 12, height: 12, borderRadius: "50%",
-                        border: "2px solid transparent", borderTopColor: C.amber,
-                      }}
-                    />
-                    Subscribing…
-                  </>
-                ) : (
-                  "Enable Alerts"
-                )}
-              </motion.button>
-            </div>
-          </div>
-        </div>
-      </motion.div>
-    </AnimatePresence>
-  );
-}
-
-
-// Small inline hint when the user has blocked notifications
-function PushDeniedHint() {
-  return (
-    <div style={{
-      padding:      "10px 14px",
-      borderRadius: 12,
-      background:   "rgba(255,58,58,0.06)",
-      border:       "1px solid rgba(255,58,58,0.18)",
-      fontSize:     "0.7rem",
-      color:        C.label,
-      fontFamily:   FONT_UI,
-      lineHeight:   1.5,
-    }}>
-      🔕 Notifications are blocked. To enable alerts, go to your browser / OS settings and allow notifications for this site.
     </div>
   );
 }

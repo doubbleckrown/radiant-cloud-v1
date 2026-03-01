@@ -1,15 +1,16 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
   SignedIn,
   SignedOut,
   RedirectToSignIn,
 } from "@clerk/clerk-react";
-import MarketsPage  from "./pages/MarketsPage";
-import SignalsPage  from "./pages/SignalsPage";
-import AccountPage  from "./pages/AccountPage";
-import ProfilePage  from "./pages/ProfilePage";
-import TabBar       from "./components/layout/TabBar";
+import MarketsPage   from "./pages/MarketsPage";
+import SignalsPage   from "./pages/SignalsPage";
+import AccountPage   from "./pages/AccountPage";
+import ProfilePage   from "./pages/ProfilePage";
+import TabBar        from "./components/layout/TabBar";
+import { initOneSignal } from "./services/pushNotifications";
 
 // ── Page-switch animation ─────────────────────────────────────────────────────
 const pageVariants = {
@@ -28,6 +29,15 @@ const TABS = [
 // ═════════════════════════════════════════════════════════════════════════════
 export default function App() {
   const [activeTab, setActiveTab] = useState("markets");
+
+  // Fire OneSignal init the moment the authenticated shell mounts.
+  // Registers the SW and loads the SDK so the subscription handshake is
+  // already underway before the user navigates to Signals.
+  // usePushNotifications() (inside SignalsPage) picks up the shared
+  // _initPromise and resolves immediately — no duplicate work.
+  useEffect(() => {
+    initOneSignal().catch(() => {});   // completely silent — never blocks render
+  }, []);
 
   const Page = {
     markets: MarketsPage,

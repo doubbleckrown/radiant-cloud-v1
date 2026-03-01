@@ -350,7 +350,7 @@ const TIMEFRAMES = [
   { label: "1h",  gran: "H1",  count: 120 },
 ];
 
-const CHART_H = 204; // 156 × 1.3 — 30% more room for candle bodies
+const CHART_H = 280; // candlestick charts need vertical room — responsive on mobile
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  InlineChart — LightweightCharts candlestick series
