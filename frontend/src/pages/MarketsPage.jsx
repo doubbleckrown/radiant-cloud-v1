@@ -339,19 +339,45 @@ export default function MarketsPage() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  InlineChart — LightweightCharts area series for M15 candles
+//  TIMEFRAME CONFIG
+//  Maps the button labels to the backend granularity strings and the candle
+//  count to request.  M1 = last 120 candles ≈ 2 h; H1 = last 120 ≈ 5 days.
+// ─────────────────────────────────────────────────────────────────────────────
+const TIMEFRAMES = [
+  { label: "1m",  gran: "M1",  count: 120 },
+  { label: "5m",  gran: "M5",  count: 120 },
+  { label: "15m", gran: "M15", count: 120 },
+  { label: "1h",  gran: "H1",  count: 120 },
+];
+
+const CHART_H = 204; // 156 × 1.3 — 30% more room for candle bodies
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  InlineChart — LightweightCharts candlestick series
+//  • Timeframe selector row above chart (1m / 5m / 15m / 1h)
+//  • Radiant colour scheme: up #00FF41 · down #FF3B3B · no borders
+//  • Re-creates the chart whenever instrument OR granularity changes
+//    (LW-Charts v4 series options are immutable after creation — full remount
+//    is the correct pattern when switching data shape)
 // ─────────────────────────────────────────────────────────────────────────────
 function InlineChart({ instrument, decimals }) {
-  const containerRef = useRef(null);
-  const chartRef     = useRef(null);
+  const containerRef           = useRef(null);
+  const [tfIdx, setTfIdx]      = useState(2); // default: 15m
+  const { gran, count }        = TIMEFRAMES[tfIdx];
+  const [loading, setLoading]  = useState(false);
+  const [noData,  setNoData]   = useState(false);
 
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
 
+    setLoading(true);
+    setNoData(false);
+
+    // ── Build chart ─────────────────────────────────────────────────────────
     const chart = createChart(el, {
       width:  el.clientWidth,
-      height: 156,
+      height: CHART_H,
       layout: {
         background:  { color: "transparent" },
         textColor:   C.label,
@@ -367,12 +393,12 @@ function InlineChart({ instrument, decimals }) {
         textColor:   C.sub,
       },
       timeScale: {
-        borderColor:       C.cardBdr,
-        textColor:         C.sub,
-        timeVisible:       true,
-        secondsVisible:    false,
-        fixLeftEdge:       true,
-        fixRightEdge:      true,
+        borderColor:    C.cardBdr,
+        textColor:      C.sub,
+        timeVisible:    true,
+        secondsVisible: false,
+        fixLeftEdge:    true,
+        fixRightEdge:   true,
       },
       crosshair: {
         vertLine: { color: "rgba(0,255,65,0.35)", labelBackgroundColor: "#0f0f0f" },
@@ -382,37 +408,42 @@ function InlineChart({ instrument, decimals }) {
       handleScale:  { mouseWheel: false, pinch: true },
     });
 
-    const series = chart.addAreaSeries({
-      lineColor:   C.green,
-      topColor:    "rgba(0,255,65,0.18)",
-      bottomColor: "rgba(0,255,65,0.0)",
-      lineWidth:   2,
-      crosshairMarkerRadius:        4,
-      crosshairMarkerBorderColor:   C.green,
-      crosshairMarkerBackgroundColor: "#000",
+    // ── Candlestick series — Radiant theme colours ──────────────────────────
+    const series = chart.addCandlestickSeries({
+      upColor:          "#00FF41",
+      downColor:        "#FF3B3B",
+      borderVisible:    false,          // clean, no outlines on bodies
+      wickUpColor:      "rgba(0,255,65,0.55)",
+      wickDownColor:    "rgba(255,59,59,0.55)",
       priceFormat: {
-        type:     "price",
-        precision: decimals,
-        minMove:   1 / Math.pow(10, decimals),
+        type:      "price",
+        precision:  decimals,
+        minMove:    1 / Math.pow(10, decimals),
       },
     });
 
-    chartRef.current = chart;
-
-    // Fetch M15 candles
-    api.get(`/markets/${instrument}/candles?granularity=M15`)
+    // ── Fetch candles ───────────────────────────────────────────────────────
+    api.get(`/markets/${instrument}/candles?granularity=${gran}&count=${count}`)
       .then(({ data }) => {
-        const formatted = data
-          .map(c => ({ time: c.t, value: c.c }))
-          .sort((a, b) => a.time - b.time);
-        if (formatted.length > 1) {
-          series.setData(formatted);
+        // Backend returns { t, o, h, l, c, v }
+        const candles = data
+          .map(c => ({ time: c.t, open: c.o, high: c.h, low: c.l, close: c.c }))
+          .sort((a, b) => a.time - b.time)
+          // LW-Charts rejects duplicate timestamps — deduplicate just in case
+          .filter((c, i, arr) => i === 0 || c.time !== arr[i - 1].time);
+
+        if (candles.length >= 2) {
+          series.setData(candles);
           chart.timeScale().fitContent();
+          setNoData(false);
+        } else {
+          setNoData(true);
         }
       })
-      .catch(() => {});
+      .catch(() => setNoData(true))
+      .finally(() => setLoading(false));
 
-    // Resize observer
+    // ── ResizeObserver ──────────────────────────────────────────────────────
     const ro = new ResizeObserver(() => {
       if (el.clientWidth > 0) chart.applyOptions({ width: el.clientWidth });
     });
@@ -421,11 +452,84 @@ function InlineChart({ instrument, decimals }) {
     return () => {
       ro.disconnect();
       chart.remove();
-      chartRef.current = null;
     };
-  }, [instrument, decimals]);
+  }, [instrument, decimals, gran, count]); // re-mount on TF change
 
-  return <div ref={containerRef} style={{ width: "100%", height: 156 }} />;
+  return (
+    <div>
+      {/* ── Timeframe selector ────────────────────────────────────────── */}
+      <div style={{
+        display:    "flex",
+        gap:        4,
+        padding:    "8px 10px 6px",
+        alignItems: "center",
+      }}>
+        {TIMEFRAMES.map(({ label }, i) => {
+          const active = i === tfIdx;
+          return (
+            <button
+              key={label}
+              onClick={() => setTfIdx(i)}
+              style={{
+                padding:       "3px 10px",
+                borderRadius:  7,
+                fontSize:      "0.65rem",
+                fontWeight:    active ? 700 : 500,
+                letterSpacing: "0.06em",
+                fontFamily:    FONT_MONO,
+                cursor:        "pointer",
+                border:        `1px solid ${active ? C.greenBdr : C.cardBdr}`,
+                background:    active ? C.greenDim : "transparent",
+                color:         active ? C.green : C.sub,
+                transition:    "background 0.15s, color 0.15s, border-color 0.15s",
+                boxShadow:     active ? "0 0 8px rgba(0,255,65,0.15)" : "none",
+              }}
+            >
+              {label}
+            </button>
+          );
+        })}
+
+        {/* Loading indicator — right-aligned */}
+        {loading && (
+          <motion.div
+            animate={{ rotate: 360 }}
+            transition={{ duration: 0.9, repeat: Infinity, ease: "linear" }}
+            style={{
+              marginLeft:  "auto",
+              width:        12,
+              height:       12,
+              borderRadius: "50%",
+              border:       "2px solid transparent",
+              borderTopColor: C.green,
+              flexShrink:   0,
+            }}
+          />
+        )}
+      </div>
+
+      {/* ── Chart canvas ──────────────────────────────────────────────── */}
+      <div style={{ position: "relative" }}>
+        <div ref={containerRef} style={{ width: "100%", height: CHART_H }} />
+
+        {/* No-data overlay */}
+        {noData && !loading && (
+          <div style={{
+            position:       "absolute",
+            inset:          0,
+            display:        "flex",
+            alignItems:     "center",
+            justifyContent: "center",
+            pointerEvents:  "none",
+          }}>
+            <span style={{ color: C.sub, fontSize: "0.72rem", fontFamily: FONT_UI }}>
+              No candle data for {TIMEFRAMES[tfIdx].label}
+            </span>
+          </div>
+        )}
+      </div>
+    </div>
+  );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

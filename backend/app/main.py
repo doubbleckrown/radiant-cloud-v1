@@ -61,6 +61,10 @@ CLERK_JWKS_URL = os.getenv(
 ONESIGNAL_APP_ID  = os.getenv("ONESIGNAL_APP_ID",  "")
 ONESIGNAL_REST_KEY = os.getenv("ONESIGNAL_REST_KEY", "")
 
+# ── Supabase (per-user Oanda credentials) ─────────────────────────────────────
+SUPABASE_URL              = os.getenv("SUPABASE_URL", "")
+SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
+
 INSTRUMENTS = [
     "EUR_USD", "GBP_USD", "USD_JPY", "AUD_USD",
     "NZD_USD", "USD_CAD", "USD_CHF",
@@ -69,7 +73,7 @@ INSTRUMENTS = [
     "GER30_EUR",  "UK100_GBP", "J225_USD",
     "BTC_USD",
 ]
-GRANULARITIES = ["M5", "M15", "H1"]
+GRANULARITIES = ["M1", "M5", "M15", "H1"]
 
 logger = logging.getLogger("fx-radiant")
 logging.basicConfig(level=logging.INFO)
@@ -89,9 +93,10 @@ _user_settings: dict[str, dict] = {}
 
 def _settings(clerk_id: str) -> dict:
     return _user_settings.setdefault(clerk_id, {
-        "auto_trade_enabled": False,
-        "risk_pct":           1.0,
-        "oanda_key_hint":     "",
+        "auto_trade_enabled":  False,
+        "risk_pct":            1.0,
+        "oanda_key_hint":      "",
+        "oanda_account_id":    "",
     })
 
 # Candle cache
@@ -208,6 +213,80 @@ def _oanda_headers() -> dict:
     return {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
 
 
+def _oanda_headers_for(api_key: str) -> dict:
+    """Return Oanda auth headers for a specific user's API key."""
+    return {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+
+
+async def _get_user_oanda_creds(clerk_id: str) -> tuple[str, str] | None:
+    """
+    Fetch the Oanda api_key and account_id for a given clerk_id from Supabase.
+    Returns (api_key, account_id) or None if not configured / Supabase not set up.
+    Falls back gracefully to the global .env credentials if Supabase is absent.
+    """
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+        # No Supabase configured — fall back to shared .env credentials
+        key     = os.environ.get("OANDA_API_KEY",    "").strip()
+        account = os.environ.get("OANDA_ACCOUNT_ID", "").strip()
+        if key and account:
+            return key, account
+        return None
+
+    try:
+        url     = f"{SUPABASE_URL}/rest/v1/users"
+        headers = {
+            "apikey":        SUPABASE_SERVICE_ROLE_KEY,
+            "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+            "Content-Type":  "application/json",
+        }
+        params = {"clerk_id": f"eq.{clerk_id}", "select": "oanda_api_key,oanda_account_id"}
+        async with httpx.AsyncClient(timeout=8) as client:
+            resp = await client.get(url, headers=headers, params=params)
+            resp.raise_for_status()
+        rows = resp.json()
+        if rows and rows[0].get("oanda_api_key") and rows[0].get("oanda_account_id"):
+            return rows[0]["oanda_api_key"], rows[0]["oanda_account_id"]
+        # Row exists but no credentials saved yet — fall back to env
+        key     = os.environ.get("OANDA_API_KEY",    "").strip()
+        account = os.environ.get("OANDA_ACCOUNT_ID", "").strip()
+        if key and account:
+            return key, account
+        return None
+    except Exception as exc:
+        logger.warning("Supabase credential lookup failed: %s — using env fallback", exc)
+        key     = os.environ.get("OANDA_API_KEY",    "").strip()
+        account = os.environ.get("OANDA_ACCOUNT_ID", "").strip()
+        if key and account:
+            return key, account
+        return None
+
+
+async def _upsert_user_oanda_creds(clerk_id: str, api_key: str, account_id: str) -> None:
+    """
+    Save / update the Oanda credentials for a given clerk_id in Supabase.
+    Silently no-ops if Supabase is not configured.
+    """
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+        logger.warning("Supabase not configured — credentials not persisted to DB")
+        return
+    url     = f"{SUPABASE_URL}/rest/v1/users"
+    headers = {
+        "apikey":        SUPABASE_SERVICE_ROLE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+        "Content-Type":  "application/json",
+        "Prefer":        "resolution=merge-duplicates",  # upsert on clerk_id unique key
+    }
+    payload = {
+        "clerk_id":          clerk_id,
+        "oanda_api_key":     api_key,
+        "oanda_account_id":  account_id,
+    }
+    async with httpx.AsyncClient(timeout=8) as client:
+        resp = await client.post(url, headers=headers, json=payload)
+        resp.raise_for_status()
+    logger.info("Supabase: credentials saved for clerk_id=%s…", clerk_id[:8])
+
+
 async def fetch_candles(instrument: str, granularity: str, count: int = 250) -> list[Candle]:
     if not _oanda_credentials_ok():
         raise RuntimeError("OANDA credentials not set")
@@ -229,41 +308,36 @@ async def fetch_candles(instrument: str, granularity: str, count: int = 250) -> 
     return candles
 
 
-async def fetch_account_summary() -> dict:
-    if not _oanda_credentials_ok():
-        raise RuntimeError("OANDA credentials not set")
-    url = f"{OANDA_BASE}/v3/accounts/{OANDA_ACCOUNT}/summary"
+async def fetch_account_summary(api_key: str, account_id: str) -> dict:
+    url = f"{OANDA_BASE}/v3/accounts/{account_id}/summary"
     async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.get(url, headers=_oanda_headers())
+        resp = await client.get(url, headers=_oanda_headers_for(api_key))
         resp.raise_for_status()
     return resp.json().get("account", {})
 
 
-async def fetch_open_trades() -> list:
-    if not _oanda_credentials_ok():
-        raise RuntimeError("OANDA credentials not set")
-    url = f"{OANDA_BASE}/v3/accounts/{OANDA_ACCOUNT}/openTrades"
+async def fetch_open_trades(api_key: str, account_id: str) -> list:
+    url = f"{OANDA_BASE}/v3/accounts/{account_id}/openTrades"
     async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.get(url, headers=_oanda_headers())
+        resp = await client.get(url, headers=_oanda_headers_for(api_key))
         resp.raise_for_status()
     return resp.json().get("trades", [])
 
 
-async def fetch_trade_history(count: int = 50) -> list:
-    if not _oanda_credentials_ok():
-        raise RuntimeError("OANDA credentials not set")
-    url    = f"{OANDA_BASE}/v3/accounts/{OANDA_ACCOUNT}/trades"
+async def fetch_trade_history(api_key: str, account_id: str, count: int = 50) -> list:
+    url    = f"{OANDA_BASE}/v3/accounts/{account_id}/trades"
     params = {"state": "CLOSED", "count": str(count)}
     async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.get(url, headers=_oanda_headers(), params=params)
+        resp = await client.get(url, headers=_oanda_headers_for(api_key), params=params)
         resp.raise_for_status()
     return resp.json().get("trades", [])
 
 
-async def place_market_order(instrument: str, units: int, stop_loss: float, take_profit: float) -> dict:
-    if not _oanda_credentials_ok():
-        raise RuntimeError("OANDA credentials not set")
-    url  = f"{OANDA_BASE}/v3/accounts/{OANDA_ACCOUNT}/orders"
+async def place_market_order(
+    api_key: str, account_id: str,
+    instrument: str, units: int, stop_loss: float, take_profit: float,
+) -> dict:
+    url  = f"{OANDA_BASE}/v3/accounts/{account_id}/orders"
     body = {"order": {
         "type": "MARKET", "instrument": instrument, "units": str(units),
         "stopLossOnFill":   {"price": f"{stop_loss:.5f}"},
@@ -271,7 +345,7 @@ async def place_market_order(instrument: str, units: int, stop_loss: float, take
         "timeInForce": "FOK",
     }}
     async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(url, headers=_oanda_headers(), json=body)
+        resp = await client.post(url, headers=_oanda_headers_for(api_key), json=body)
         resp.raise_for_status()
     return resp.json()
 
@@ -535,6 +609,11 @@ class OrderRequest(BaseModel):
     take_profit: float
 
 
+class OandaCredentialsRequest(BaseModel):
+    oanda_api_key:    str
+    oanda_account_id: str
+
+
 class PushRegisterRequest(BaseModel):
     player_id: str
 
@@ -559,11 +638,23 @@ async def me(payload: dict = Depends(get_current_user)):
     """
     clerk_id = payload["sub"]
     s = _settings(clerk_id)
+    # Also try to pull account_id from Supabase for display purposes
+    account_id = s.get("oanda_account_id", "")
+    if not account_id and (SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY):
+        try:
+            creds = await _get_user_oanda_creds(clerk_id)
+            if creds:
+                account_id = creds[1]
+                s["oanda_account_id"] = account_id
+        except Exception:
+            pass
+
     return {
         "clerk_id":           clerk_id,
         "auto_trade_enabled": s["auto_trade_enabled"],
         "risk_pct":           s["risk_pct"],
         "oanda_key_hint":     s["oanda_key_hint"],
+        "oanda_account_id":   account_id,
     }
 
 
@@ -587,6 +678,40 @@ async def update_user_settings(
         "auto_trade_enabled": s["auto_trade_enabled"],
         "risk_pct":           s["risk_pct"],
         "oanda_key_hint":     s["oanda_key_hint"],
+    }
+
+
+@app.post("/api/users/me/oanda-credentials")
+async def save_oanda_credentials(
+    body:    OandaCredentialsRequest,
+    payload: dict = Depends(get_current_user),
+):
+    """
+    Save or update the user's Oanda API key and account ID in Supabase.
+    The full API key is stored server-side only — never sent back to the client.
+    """
+    clerk_id   = payload["sub"]
+    api_key    = body.oanda_api_key.strip()
+    account_id = body.oanda_account_id.strip()
+
+    if not api_key or not account_id:
+        raise HTTPException(400, "Both oanda_api_key and oanda_account_id are required")
+
+    # Quick sanity-check: try fetching account summary with the supplied creds
+    try:
+        await fetch_account_summary(api_key, account_id)
+    except Exception:
+        raise HTTPException(422, "Could not verify credentials — check your Oanda API key and account ID")
+
+    await _upsert_user_oanda_creds(clerk_id, api_key, account_id)
+    # Update in-memory settings cache so /api/auth/me reflects the change immediately
+    s = _settings(clerk_id)
+    s["oanda_key_hint"]   = api_key[-4:]
+    s["oanda_account_id"] = account_id
+    return {
+        "saved":             True,
+        "oanda_account_id":  account_id,
+        "oanda_key_hint":    api_key[-4:],
     }
 
 
@@ -628,13 +753,20 @@ async def get_markets(_: dict = Depends(get_current_user)):
 
 
 @app.get("/api/markets/{instrument}/candles")
-async def get_candles(instrument: str, granularity: str = "H1", _: dict = Depends(get_current_user)):
+async def get_candles(
+    instrument:  str,
+    granularity: str = "H1",
+    count:       int = 120,          # how many candles the frontend wants
+    _: dict = Depends(get_current_user),
+):
     if instrument not in _candle_cache:
         raise HTTPException(404, "Instrument not found")
+    # Cap at 500 to prevent accidentally enormous payloads
+    n       = max(1, min(count, 500))
     candles = _candle_cache[instrument].get(granularity, [])
     return [
         {"t": c.time, "o": c.open, "h": c.high, "l": c.low, "c": c.close, "v": c.volume}
-        for c in candles[-500:]
+        for c in candles[-n:]
     ]
 
 
@@ -668,33 +800,49 @@ async def get_signals(_: dict = Depends(get_current_user)):
 # ─────────────────────────────────────────────────────────────────────────────
 
 @app.get("/api/account")
-async def get_account(_: dict = Depends(get_current_user)):
+async def get_account(payload: dict = Depends(get_current_user)):
+    clerk_id = payload["sub"]
+    creds    = await _get_user_oanda_creds(clerk_id)
+    if not creds:
+        raise HTTPException(422, "No Oanda credentials saved — add them in Profile → Oanda Credentials")
     try:
-        return await fetch_account_summary()
+        return await fetch_account_summary(*creds)
     except Exception as e:
         raise HTTPException(503, f"Oanda error: {e}")
 
 
 @app.get("/api/account/trades")
-async def get_open_trades(_: dict = Depends(get_current_user)):
+async def get_open_trades(payload: dict = Depends(get_current_user)):
+    clerk_id = payload["sub"]
+    creds    = await _get_user_oanda_creds(clerk_id)
+    if not creds:
+        raise HTTPException(422, "No Oanda credentials saved — add them in Profile → Oanda Credentials")
     try:
-        return await fetch_open_trades()
+        return await fetch_open_trades(*creds)
     except Exception as e:
         raise HTTPException(503, f"Oanda error: {e}")
 
 
 @app.get("/api/account/history")
-async def get_trade_history(_: dict = Depends(get_current_user)):
+async def get_trade_history(payload: dict = Depends(get_current_user)):
+    clerk_id = payload["sub"]
+    creds    = await _get_user_oanda_creds(clerk_id)
+    if not creds:
+        raise HTTPException(422, "No Oanda credentials saved — add them in Profile → Oanda Credentials")
     try:
-        return await fetch_trade_history(count=50)
+        return await fetch_trade_history(*creds, count=50)
     except Exception as e:
         raise HTTPException(503, f"Oanda error: {e}")
 
 
 @app.post("/api/orders")
-async def create_order(body: OrderRequest, _: dict = Depends(get_current_user)):
+async def create_order(body: OrderRequest, payload: dict = Depends(get_current_user)):
+    clerk_id = payload["sub"]
+    creds    = await _get_user_oanda_creds(clerk_id)
+    if not creds:
+        raise HTTPException(422, "No Oanda credentials saved — add them in Profile → Oanda Credentials")
     try:
-        return await place_market_order(body.instrument, body.units, body.stop_loss, body.take_profit)
+        return await place_market_order(*creds, body.instrument, body.units, body.stop_loss, body.take_profit)
     except Exception as e:
         raise HTTPException(503, f"Order error: {e}")
 

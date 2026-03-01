@@ -1,23 +1,20 @@
 /**
- * authStore — thin Zustand store for FX Radiant app-level settings.
+ * authStore — Zustand store for FX Radiant app-level settings.
  *
- * Identity (name, email, sessions, tokens) is now owned by Clerk.
- * This store only holds per-user backend settings fetched from
- * GET /api/auth/me after sign-in: auto_trade_enabled, risk_pct, etc.
- *
- * Components that need user identity should import Clerk hooks directly:
- *   import { useUser, useAuth } from "@clerk/clerk-react";
- *   const { user } = useUser();        // name, email, imageUrl
- *   const { getToken } = useAuth();    // fresh session token
+ * Identity (name, email, sessions) is owned by Clerk.
+ * This store holds:
+ *   • Backend trading settings (auto_trade_enabled, risk_pct)
+ *   • Oanda credential status (hint + account_id — never the full key)
  */
 import { create } from "zustand";
 import api from "../utils/api";
 
 export const useAuthStore = create((set, get) => ({
-  // ── Backend user settings (not Clerk identity) ──────────────────────────────
+  // ── Backend settings ────────────────────────────────────────────────────────
   auto_trade_enabled: false,
   risk_pct:           1.0,
-  oanda_key_hint:     "",
+  oanda_key_hint:     "",        // last 4 chars of API key, safe to display
+  oanda_account_id:   "",        // account ID (not secret, OK to display)
   settingsLoaded:     false,
 
   // ── Fetch backend settings after Clerk sign-in ───────────────────────────────
@@ -28,22 +25,23 @@ export const useAuthStore = create((set, get) => ({
         auto_trade_enabled: data.auto_trade_enabled ?? false,
         risk_pct:           data.risk_pct           ?? 1.0,
         oanda_key_hint:     data.oanda_key_hint      ?? "",
+        oanda_account_id:   data.oanda_account_id    ?? "",
         settingsLoaded:     true,
       });
     } catch {
-      // Non-fatal — store keeps defaults; will retry on next render
+      // Non-fatal — keep defaults
     }
   },
 
   // ── Toggle Master Auto-Trade (optimistic) ────────────────────────────────────
   updateAutoTrade: async (enabled) => {
     const prev = get().auto_trade_enabled;
-    set({ auto_trade_enabled: enabled });  // optimistic
+    set({ auto_trade_enabled: enabled });
     try {
       const { data } = await api.patch("/users/me/settings", { auto_trade_enabled: enabled });
       set({ auto_trade_enabled: data.auto_trade_enabled });
     } catch (err) {
-      set({ auto_trade_enabled: prev });  // rollback
+      set({ auto_trade_enabled: prev });
       throw err;
     }
   },
@@ -60,5 +58,21 @@ export const useAuthStore = create((set, get) => ({
     } catch (err) {
       throw err;
     }
+  },
+
+  // ── Save Oanda credentials to Supabase via backend ───────────────────────────
+  // Sends the full API key + account ID to POST /api/users/me/oanda-credentials.
+  // Backend verifies them against Oanda before storing in Supabase.
+  // On success, only the hint + account_id are stored in local state.
+  saveOandaCredentials: async (oanda_api_key, oanda_account_id) => {
+    const { data } = await api.post("/users/me/oanda-credentials", {
+      oanda_api_key,
+      oanda_account_id,
+    });
+    set({
+      oanda_key_hint:   data.oanda_key_hint   ?? oanda_api_key.slice(-4),
+      oanda_account_id: data.oanda_account_id ?? oanda_account_id,
+    });
+    return data;
   },
 }));
