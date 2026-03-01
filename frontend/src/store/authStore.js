@@ -5,19 +5,41 @@
  * This store holds:
  *   • Backend trading settings (auto_trade_enabled, risk_pct)
  *   • Oanda credential status (hint + account_id — never the full key)
+ *   • appMode: 'FOREX' | 'CRYPTO'  — persisted to localStorage
  */
 import { create } from "zustand";
 import api from "../utils/api";
 
+// ── Read persisted appMode safely ─────────────────────────────────────────────
+const _readMode = () => {
+  try {
+    const m = localStorage.getItem("fx-radiant-app-mode");
+    return m === "CRYPTO" ? "CRYPTO" : "FOREX";
+  } catch {
+    return "FOREX";
+  }
+};
+
 export const useAuthStore = create((set, get) => ({
-  // ── Backend settings ────────────────────────────────────────────────────────
+  // ── App Mode — persisted ──────────────────────────────────────────────────
+  // 'FOREX'  → Oanda engine  (green theme)
+  // 'CRYPTO' → Bybit engine  (orange theme)
+  appMode: _readMode(),
+
+  toggleAppMode: () => {
+    const next = get().appMode === "FOREX" ? "CRYPTO" : "FOREX";
+    try { localStorage.setItem("fx-radiant-app-mode", next); } catch { /* storage unavailable */ }
+    set({ appMode: next });
+  },
+
+  // ── Backend settings ──────────────────────────────────────────────────────
   auto_trade_enabled: false,
   risk_pct:           1.0,
   oanda_key_hint:     "",        // last 4 chars of API key, safe to display
   oanda_account_id:   "",        // account ID (not secret, OK to display)
   settingsLoaded:     false,
 
-  // ── Fetch backend settings after Clerk sign-in ───────────────────────────────
+  // ── Fetch backend settings after Clerk sign-in ────────────────────────────
   fetchMe: async () => {
     try {
       const { data } = await api.get("/auth/me");
@@ -33,7 +55,7 @@ export const useAuthStore = create((set, get) => ({
     }
   },
 
-  // ── Toggle Master Auto-Trade (optimistic) ────────────────────────────────────
+  // ── Toggle Master Auto-Trade (optimistic) ─────────────────────────────────
   updateAutoTrade: async (enabled) => {
     const prev = get().auto_trade_enabled;
     set({ auto_trade_enabled: enabled });
@@ -46,7 +68,7 @@ export const useAuthStore = create((set, get) => ({
     }
   },
 
-  // ── Update any settings field ─────────────────────────────────────────────────
+  // ── Update any settings field ──────────────────────────────────────────────
   updateSettings: async (patch) => {
     try {
       const { data } = await api.patch("/users/me/settings", patch);
@@ -60,10 +82,7 @@ export const useAuthStore = create((set, get) => ({
     }
   },
 
-  // ── Save Oanda credentials to Supabase via backend ───────────────────────────
-  // Sends the full API key + account ID to POST /api/users/me/oanda-credentials.
-  // Backend verifies them against Oanda before storing in Supabase.
-  // On success, only the hint + account_id are stored in local state.
+  // ── Save Oanda credentials to Supabase via backend ────────────────────────
   saveOandaCredentials: async (oanda_api_key, oanda_account_id) => {
     const { data } = await api.post("/users/me/oanda-credentials", {
       oanda_api_key,

@@ -1,31 +1,33 @@
 /**
- * AccountPage
- * ══════════════════════════════════════════════════════════════════
- * Layout (top → bottom):
- *   1. Sticky header  ← now includes a BalanceSparkline drawn from history
- *   2. Master Auto-Trade toggle
- *   3. Tab bar: Summary | Open Trades | History
- *   4. Tab content panel
- *      - Open Trades: accordion expansion per row (TradeDetailCard)
- *      - History:     accordion expansion per row (TradeDetailCard)
+ * AccountPage — Dual-Engine
+ * ══════════════════════════════════════════════════════════════════════════════
+ * FOREX mode  → Oanda v20  (account / trades / history)
+ * CRYPTO mode → Bybit UTA  (bybit/account · bybit/account/positions · bybit/account/history)
  *
- * ALL text uses explicit inline color values so text is readable on every
- * deployment target (Vercel, iPhone Safari) without depending on Tailwind.
+ * Architecture rules:
+ *  • OANDA state  (account, trades, history, sparklinePoints) is NEVER mutated
+ *    in CRYPTO mode.
+ *  • BYBIT state  (bybitAccount, bybitPositions, bybitHistory, bybitSparkline)
+ *    is NEVER mutated in FOREX mode.
+ *  • loadOandaXxx() and loadBybitXxx() are fully separate functions — no
+ *    nested if/else mixing the two engines.
+ *  • All BYBIT requests include X-App-Mode: CRYPTO header.
+ *  • normalizeTrade(t, isCrypto, kind) maps both trade shapes to a common schema
+ *    so TradeDetailCard has zero mode-specific branches in its render.
+ *  • Strict null-checks on every Bybit field to prevent black-screen crashes.
  *
- * Backend routes consumed:
- *   GET  /api/account            → summary
- *   GET  /api/account/trades     → open positions
- *   GET  /api/account/history    → last 50 closed trades  (also drives sparkline)
- *   GET  /api/auth/me            → auto_trade_enabled
- *   PATCH /api/users/me/settings → toggle auto_trade_enabled
+ * Backend routes:
+ *   Oanda: GET /api/account, /api/account/trades, /api/account/history
+ *   Bybit: GET /api/bybit/account, /api/bybit/account/positions, /api/bybit/account/history
  */
 import { useEffect, useState, useCallback } from "react";
-import { motion, AnimatePresence } from "framer-motion";
-import api from "../utils/api";
-import { useAuthStore } from "../store/authStore";
-import { useUser } from "@clerk/clerk-react";
+import { motion, AnimatePresence }           from "framer-motion";
+import api                                   from "../utils/api";
+import { useAuthStore }                      from "../store/authStore";
+import { useTheme }                          from "../hooks/useTheme";
+import { useUser }                           from "@clerk/clerk-react";
 
-// ── Shared colour tokens ──────────────────────────────────────────────────────
+// ── Non-accent colour tokens (same in both modes) ─────────────────────────────
 const C = {
   green:    "#00FF41",
   greenDim: "rgba(0,255,65,0.12)",
@@ -39,38 +41,48 @@ const C = {
   cardBdr:  "rgba(255,255,255,0.07)",
   sheet:    "#141414",
 };
-
 const FONT_UI   = "'Inter', sans-serif";
 const FONT_MONO = "'JetBrains Mono', monospace";
 
 const TABS = ["Summary", "Open Trades", "History"];
 
-// ─────────────────────────────────────────────────────────────────────────────
+// ── Bybit API headers ──────────────────────────────────────────────────────────
+const BYBIT_HEADERS = { "X-App-Mode": "CRYPTO" };
+
+// ═════════════════════════════════════════════════════════════════════════════
 export default function AccountPage() {
   const { user: clerkUser } = useUser();
+  const { isCrypto, accent, accentDim, accentBdr } = useTheme();
   const { auto_trade_enabled, fetchMe, updateAutoTrade } = useAuthStore();
 
   const [toggling,    setToggling]    = useState(false);
   const [toggleError, setToggleError] = useState(null);
   const autoTradeOn = auto_trade_enabled ?? false;
 
-  const [activeTab,      setActiveTab]      = useState("Summary");
-  const [account,        setAccount]        = useState(null);
-  const [trades,         setTrades]         = useState([]);
-  const [history,        setHistory]        = useState([]);
-  const [loading,        setLoading]        = useState({});
-  const [errors,         setErrors]         = useState({});
-  const [sparklinePoints, setSparklinePoints] = useState([]);  // ← NEW
+  const [activeTab, setActiveTab] = useState("Summary");
+  const [loading,   setLoading]   = useState({});
+  const [errors,    setErrors]    = useState({});
 
+  // ── OANDA engine state (never mutated in CRYPTO mode) ─────────────────────
+  const [account,         setAccount]         = useState(null);
+  const [trades,          setTrades]          = useState([]);
+  const [history,         setHistory]         = useState([]);
+  const [sparklinePoints, setSparklinePoints] = useState([]);
+
+  // ── BYBIT engine state (never mutated in FOREX mode) ──────────────────────
+  const [bybitAccount,   setBybitAccount]   = useState(null);
+  const [bybitPositions, setBybitPositions] = useState([]);
+  const [bybitHistory,   setBybitHistory]   = useState([]);
+  const [bybitSparkline, setBybitSparkline] = useState([]);
+
+  // ── Init ──────────────────────────────────────────────────────────────────
   useEffect(() => { fetchMe(); }, []); // eslint-disable-line
 
-  // ── Eagerly load history on mount for the header sparkline ─────────────────
-  // This also pre-fills the History tab so it doesn't need to re-fetch.
+  // ── OANDA: eagerly load history for the header sparkline (FOREX) ──────────
   useEffect(() => {
     api.get("/account/history")
       .then(({ data }) => {
         if (!Array.isArray(data) || data.length === 0) return;
-        // Sort oldest → newest, then build a running-PnL series
         const sorted = [...data].sort(
           (a, b) => new Date(a.closeTime ?? 0) - new Date(b.closeTime ?? 0)
         );
@@ -80,40 +92,112 @@ export default function AccountPage() {
           return running;
         });
         setSparklinePoints(pts);
-        setHistory(data); // pre-fill History tab
+        setHistory(data);
       })
       .catch(() => {});
   }, []); // eslint-disable-line
 
+  // ── BYBIT: eagerly load history for sparkline when entering CRYPTO mode ───
   useEffect(() => {
-    if (activeTab === "Summary"     && !account)       loadSummary();
-    if (activeTab === "Open Trades" && !trades.length) loadTrades();
-    if (activeTab === "History"     && !history.length) loadHistory();
-  }, [activeTab]); // eslint-disable-line
+    if (!isCrypto) return;             // ← isolated: never runs in FOREX mode
+    if (bybitHistory.length > 0) return; // already loaded
+    api.get("/bybit/account/history", { headers: BYBIT_HEADERS })
+      .then(({ data }) => {
+        if (!Array.isArray(data) || data.length === 0) return;
+        const sorted = [...data].sort(
+          (a, b) => parseInt(a.createdTime ?? 0) - parseInt(b.createdTime ?? 0)
+        );
+        let running = 0;
+        const pts = sorted.map(t => {
+          running += parseFloat(t.closedPnl ?? t.closedPnl ?? 0);
+          return running;
+        });
+        setBybitSparkline(pts);
+        setBybitHistory(data);
+      })
+      .catch(() => {});
+  }, [isCrypto]); // eslint-disable-line
 
+  // ── Reset to Summary tab whenever mode switches ────────────────────────────
+  useEffect(() => {
+    setActiveTab("Summary");
+  }, [isCrypto]);
+
+  // ── Load correct data for the active tab and mode ─────────────────────────
+  useEffect(() => {
+    if (!isCrypto) {
+      // OANDA engine
+      if (activeTab === "Summary"     && !account)       loadOandaSummary();
+      if (activeTab === "Open Trades" && !trades.length) loadOandaTrades();
+      if (activeTab === "History"     && !history.length) loadOandaHistory();
+    } else {
+      // BYBIT engine
+      if (activeTab === "Summary"     && !bybitAccount)            loadBybitAccount();
+      if (activeTab === "Open Trades" && !bybitPositions.length)   loadBybitPositions();
+      if (activeTab === "History"     && !bybitHistory.length)     loadBybitHistory();
+    }
+  }, [activeTab, isCrypto]); // eslint-disable-line
+
+  // ── Helpers ───────────────────────────────────────────────────────────────
   const mark = (tab, isLoading, err = null) => {
     setLoading(p => ({ ...p, [tab]: isLoading }));
     setErrors( p => ({ ...p, [tab]: err }));
   };
 
-  const loadSummary = useCallback(async () => {
+  // ── OANDA load functions (UNCHANGED behaviour, renamed for clarity) ────────
+  const loadOandaSummary = useCallback(async () => {
     mark("Summary", true);
     try   { const { data } = await api.get("/account"); setAccount(data); mark("Summary", false); }
     catch (e) { mark("Summary", false, e.userMessage ?? "Could not load account"); }
   }, []);
 
-  const loadTrades = useCallback(async () => {
+  const loadOandaTrades = useCallback(async () => {
     mark("Open Trades", true);
     try   { const { data } = await api.get("/account/trades"); setTrades(data ?? []); mark("Open Trades", false); }
     catch (e) { mark("Open Trades", false, e.userMessage ?? "Could not load trades"); }
   }, []);
 
-  const loadHistory = useCallback(async () => {
+  const loadOandaHistory = useCallback(async () => {
     mark("History", true);
     try   { const { data } = await api.get("/account/history"); setHistory(data ?? []); mark("History", false); }
     catch (e) { mark("History", false, e.userMessage ?? "Could not load history"); }
   }, []);
 
+  // ── BYBIT load functions (new — strict null-checks throughout) ─────────────
+  const loadBybitAccount = useCallback(async () => {
+    mark("Summary", true);
+    try {
+      const { data } = await api.get("/bybit/account", { headers: BYBIT_HEADERS });
+      setBybitAccount(data ?? {});
+      mark("Summary", false);
+    } catch (e) {
+      mark("Summary", false, e.userMessage ?? "Could not load Bybit account");
+    }
+  }, []);
+
+  const loadBybitPositions = useCallback(async () => {
+    mark("Open Trades", true);
+    try {
+      const { data } = await api.get("/bybit/account/positions", { headers: BYBIT_HEADERS });
+      setBybitPositions(Array.isArray(data) ? data : []);
+      mark("Open Trades", false);
+    } catch (e) {
+      mark("Open Trades", false, e.userMessage ?? "Could not load Bybit positions");
+    }
+  }, []);
+
+  const loadBybitHistory = useCallback(async () => {
+    mark("History", true);
+    try {
+      const { data } = await api.get("/bybit/account/history", { headers: BYBIT_HEADERS });
+      setBybitHistory(Array.isArray(data) ? data : []);
+      mark("History", false);
+    } catch (e) {
+      mark("History", false, e.userMessage ?? "Could not load Bybit history");
+    }
+  }, []);
+
+  // ── Auto-trade toggle (Oanda only) ────────────────────────────────────────
   const handleToggle = useCallback(async () => {
     if (toggling) return;
     setToggling(true); setToggleError(null);
@@ -122,53 +206,82 @@ export default function AccountPage() {
     finally   { setToggling(false); }
   }, [toggling, autoTradeOn, updateAutoTrade]);
 
+  // ── Active state (routed by mode) ─────────────────────────────────────────
+  const activeAccount   = isCrypto ? bybitAccount   : account;
+  const activeTrades    = isCrypto ? bybitPositions  : trades;
+  const activeHistory   = isCrypto ? bybitHistory    : history;
+  const activeSparkline = isCrypto ? bybitSparkline  : sparklinePoints;
+
+  const retryFns = {
+    Summary:      isCrypto ? loadBybitAccount    : loadOandaSummary,
+    "Open Trades": isCrypto ? loadBybitPositions  : loadOandaTrades,
+    History:      isCrypto ? loadBybitHistory    : loadOandaHistory,
+  };
+
   return (
     <div style={{ fontFamily: FONT_UI, color: C.white, minHeight: "100%" }}>
 
-      {/* ── Sticky header ──────────────────────────────────────────────── */}
+      {/* ── Sticky header ────────────────────────────────────────────────── */}
       <div style={{
-        position: "sticky", top: 0, zIndex: 20,
-        padding: "16px 16px 12px",
-        background: "rgba(5,5,5,0.97)",
-        backdropFilter: "blur(20px)",
+        position:             "sticky",
+        top:                  0,
+        zIndex:               20,
+        padding:              "16px 16px 12px",
+        background:           "rgba(5,5,5,0.97)",
+        backdropFilter:       "blur(20px)",
         WebkitBackdropFilter: "blur(20px)",
-        borderBottom: "1px solid rgba(0,255,65,0.08)",
+        borderBottom:         `1px solid ${accent}14`,
       }}>
-        {/* Title row */}
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
           <div>
-            <h1 style={{ color: C.white, fontSize: "1.2rem", fontWeight: 700, letterSpacing: "0.03em", margin: 0, fontFamily: FONT_UI }}>
-              Account
+            <h1 style={{
+              color: C.white, fontSize: "1.2rem", fontWeight: 700,
+              letterSpacing: "0.03em", margin: 0, fontFamily: FONT_UI,
+            }}>
+              {isCrypto ? "Bybit Account" : "Account"}
             </h1>
-            <p style={{ color: C.label, fontSize: "0.7rem", margin: "2px 0 0", fontFamily: FONT_UI }}>Oanda v20 · Live data</p>
+            <p style={{ color: C.label, fontSize: "0.7rem", margin: "2px 0 0", fontFamily: FONT_UI }}>
+              {isCrypto ? "Bybit UTA · Live data" : "Oanda v20 · Live data"}
+            </p>
           </div>
 
-          {/* ── Balance Sparkline (middle) ── */}
-          {sparklinePoints.length > 1 && (
-            <BalanceSparkline points={sparklinePoints} />
+          {/* Balance Sparkline */}
+          {activeSparkline.length > 1 && (
+            <BalanceSparkline points={activeSparkline} accent={accent} />
           )}
 
           {/* LIVE badge */}
           <div style={{
             display: "flex", alignItems: "center", gap: 6,
             padding: "6px 12px", borderRadius: 99,
-            background: "rgba(0,255,65,0.07)", border: "1px solid rgba(0,255,65,0.18)",
+            background: accentDim, border: `1px solid ${accentBdr}`,
           }}>
             <motion.div
               animate={{ opacity: [1, 0.25, 1] }}
               transition={{ duration: 1.4, repeat: Infinity }}
-              style={{ width: 6, height: 6, borderRadius: "50%", background: C.green }}
+              style={{ width: 6, height: 6, borderRadius: "50%", background: accent }}
             />
-            <span style={{ color: C.green, fontSize: "0.65rem", fontWeight: 700, letterSpacing: "0.1em", fontFamily: FONT_UI }}>LIVE</span>
+            <span style={{
+              color: accent, fontSize: "0.65rem", fontWeight: 700,
+              letterSpacing: "0.1em", fontFamily: FONT_UI,
+            }}>LIVE</span>
           </div>
         </div>
       </div>
 
-      {/* ── Content ───────────────────────────────────────────────────── */}
+      {/* ── Content ────────────────────────────────────────────────────── */}
       <div style={{ padding: "16px 16px 32px", display: "flex", flexDirection: "column", gap: 12 }}>
 
-        {/* AUTO-TRADE TOGGLE */}
-        <AutoTradeToggle isOn={autoTradeOn} toggling={toggling} error={toggleError} onToggle={handleToggle} />
+        {/* AUTO-TRADE TOGGLE — Oanda only; Bybit auto-trading in future sprint */}
+        {!isCrypto && (
+          <AutoTradeToggle
+            isOn={autoTradeOn}
+            toggling={toggling}
+            error={toggleError}
+            onToggle={handleToggle}
+          />
+        )}
+        {isCrypto && <BybitAutoTradeNotice />}
 
         {/* TAB BAR */}
         <div style={{
@@ -184,8 +297,8 @@ export default function AccountPage() {
                 whileTap={{ scale: 0.97 }}
                 style={{
                   flex: 1, minHeight: 46, border: "none",
-                  background: active ? C.greenDim : "transparent",
-                  color: active ? C.green : C.label,
+                  background: active ? accentDim : "transparent",
+                  color:      active ? accent    : C.label,
                   fontSize: "0.72rem", fontWeight: active ? 700 : 500,
                   letterSpacing: "0.07em", cursor: "pointer",
                   position: "relative",
@@ -200,7 +313,8 @@ export default function AccountPage() {
                     style={{
                       position: "absolute", bottom: 0, left: "8%", right: "8%",
                       height: 2, borderRadius: 1,
-                      background: C.green, boxShadow: `0 0 8px ${C.green}`,
+                      background: accent,
+                      boxShadow: `0 0 8px ${accent}`,
                     }}
                   />
                 )}
@@ -212,28 +326,55 @@ export default function AccountPage() {
         {/* TAB CONTENT */}
         <AnimatePresence mode="wait">
           <motion.div
-            key={activeTab}
+            key={activeTab + (isCrypto ? "-crypto" : "-forex")}
             initial={{ opacity: 0, y: 8 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -8 }}
             transition={{ duration: 0.18 }}
           >
-            {activeTab === "Summary"     && <SummaryTab    account={account} loading={loading.Summary}         error={errors.Summary}         onRetry={loadSummary} />}
-            {activeTab === "Open Trades" && <OpenTradesTab trades={trades}   loading={loading["Open Trades"]}  error={errors["Open Trades"]}  onRetry={loadTrades}  />}
-            {activeTab === "History"     && <HistoryTab    history={history}  loading={loading.History}         error={errors.History}         onRetry={loadHistory} />}
+            {activeTab === "Summary" && (
+              <SummaryTab
+                account={activeAccount}
+                loading={loading.Summary}
+                error={errors.Summary}
+                onRetry={retryFns.Summary}
+                isCrypto={isCrypto}
+                accent={accent}
+                accentDim={accentDim}
+                accentBdr={accentBdr}
+              />
+            )}
+            {activeTab === "Open Trades" && (
+              <OpenTradesTab
+                trades={activeTrades}
+                loading={loading["Open Trades"]}
+                error={errors["Open Trades"]}
+                onRetry={retryFns["Open Trades"]}
+                isCrypto={isCrypto}
+                accent={accent}
+              />
+            )}
+            {activeTab === "History" && (
+              <HistoryTab
+                history={activeHistory}
+                loading={loading.History}
+                error={errors.History}
+                onRetry={retryFns.History}
+                isCrypto={isCrypto}
+                accent={accent}
+              />
+            )}
           </motion.div>
         </AnimatePresence>
-
       </div>
     </div>
   );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  BalanceSparkline — inline SVG line chart for the header
-//  Points are a cumulative-PnL array built from history data.
+//  BalanceSparkline — accepts an `accent` prop so the line colour matches mode
 // ─────────────────────────────────────────────────────────────────────────────
-function BalanceSparkline({ points }) {
+function BalanceSparkline({ points, accent }) {
   const W = 88, H = 32;
   const min = Math.min(...points);
   const max = Math.max(...points);
@@ -245,14 +386,13 @@ function BalanceSparkline({ points }) {
     return `${x.toFixed(1)},${y.toFixed(1)}`;
   });
 
-  const pathD  = "M" + coords.join(" L");
+  const pathD   = "M" + coords.join(" L");
   const lastPnl = points[points.length - 1];
   const color   = lastPnl >= 0 ? C.green : C.red;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 3 }}>
       <svg width={W} height={H} viewBox={`0 0 ${W} ${H}`} style={{ overflow: "visible" }}>
-        {/* Zero line */}
         {min < 0 && max > 0 && (
           <line
             x1="0" y1={H - 4 - ((-min) / range) * (H - 8)}
@@ -260,30 +400,21 @@ function BalanceSparkline({ points }) {
             stroke="rgba(255,255,255,0.08)" strokeWidth="1" strokeDasharray="3,3"
           />
         )}
-        {/* Sparkline */}
         <path
-          d={pathD}
-          fill="none"
-          stroke={color}
-          strokeWidth="1.5"
-          strokeLinecap="round"
-          strokeLinejoin="round"
+          d={pathD} fill="none" stroke={color} strokeWidth="1.5"
+          strokeLinecap="round" strokeLinejoin="round"
           style={{ filter: `drop-shadow(0 0 3px ${color}80)` }}
         />
-        {/* Last dot */}
         <circle
           cx={coords[coords.length - 1].split(",")[0]}
           cy={coords[coords.length - 1].split(",")[1]}
-          r="2.5"
-          fill={color}
+          r="2.5" fill={color}
           style={{ filter: `drop-shadow(0 0 4px ${color})` }}
         />
       </svg>
       <span style={{
-        color:         C.sub,
-        fontSize:      "0.55rem",
-        fontFamily:    FONT_MONO,
-        letterSpacing: "0.06em",
+        color: C.sub, fontSize: "0.55rem",
+        fontFamily: FONT_MONO, letterSpacing: "0.06em",
       }}>
         {lastPnl >= 0 ? "+" : ""}{lastPnl.toFixed(2)} P&L
       </span>
@@ -292,7 +423,7 @@ function BalanceSparkline({ points }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  AutoTradeToggle  (UNCHANGED)
+//  AutoTradeToggle  (UNCHANGED — Oanda only)
 // ─────────────────────────────────────────────────────────────────────────────
 function AutoTradeToggle({ isOn, toggling, error, onToggle }) {
   return (
@@ -320,7 +451,10 @@ function AutoTradeToggle({ isOn, toggling, error, onToggle }) {
             {isOn ? "⚡" : "🤖"}
           </motion.div>
           <div style={{ flex: 1, minWidth: 0 }}>
-            <p style={{ color: C.white, fontSize: "0.9rem", fontWeight: 600, margin: 0, letterSpacing: "0.02em", fontFamily: FONT_UI }}>
+            <p style={{
+              color: C.white, fontSize: "0.9rem", fontWeight: 600,
+              margin: 0, letterSpacing: "0.02em", fontFamily: FONT_UI,
+            }}>
               Master Auto-Trade
             </p>
             <motion.p
@@ -417,9 +551,46 @@ function AutoTradeToggle({ isOn, toggling, error, onToggle }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Shared helpers  (UNCHANGED)
+//  BybitAutoTradeNotice — placeholder shown in CRYPTO mode
+// ─────────────────────────────────────────────────────────────────────────────
+function BybitAutoTradeNotice() {
+  return (
+    <div style={{
+      borderRadius: 16,
+      border:       "1px solid rgba(255,165,0,0.2)",
+      background:   "rgba(255,165,0,0.05)",
+      padding:      "14px 16px",
+      display:      "flex",
+      alignItems:   "center",
+      gap:          12,
+    }}>
+      <div style={{
+        width: 36, height: 36, borderRadius: 10, flexShrink: 0,
+        display: "flex", alignItems: "center", justifyContent: "center",
+        fontSize: "1.1rem",
+        background: "rgba(255,165,0,0.1)",
+        border: "1px solid rgba(255,165,0,0.25)",
+      }}>₿</div>
+      <div>
+        <p style={{
+          color: "#FFA500", fontSize: "0.82rem", fontWeight: 700,
+          margin: "0 0 2px", fontFamily: FONT_UI,
+        }}>
+          Bybit Auto-Trade
+        </p>
+        <p style={{ color: C.sub, fontSize: "0.68rem", margin: 0, fontFamily: FONT_UI }}>
+          Automated execution on Bybit — coming in next sprint.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Shared helpers
 // ─────────────────────────────────────────────────────────────────────────────
 function TabLoading() {
+  const { accent } = useTheme();
   return (
     <div style={{ display: "flex", justifyContent: "center", padding: "64px 0" }}>
       <motion.div
@@ -427,7 +598,7 @@ function TabLoading() {
         transition={{ duration: 1, repeat: Infinity, ease: "linear" }}
         style={{
           width: 32, height: 32, borderRadius: "50%",
-          border: "2px solid transparent", borderTopColor: C.green,
+          border: "2px solid transparent", borderTopColor: accent,
         }}
       />
     </div>
@@ -440,14 +611,21 @@ function TabError({ message, onRetry }) {
       borderRadius: 16, padding: 16,
       background: "rgba(255,58,58,0.06)", border: "1px solid rgba(255,58,58,0.2)",
     }}>
-      <p style={{ color: C.red, fontSize: "0.82rem", fontWeight: 600, margin: "0 0 6px", fontFamily: FONT_UI }}>Connection Error</p>
-      <p style={{ color: C.label, fontSize: "0.72rem", lineHeight: 1.5, margin: 0, fontFamily: FONT_UI }}>{message}</p>
+      <p style={{
+        color: C.red, fontSize: "0.82rem", fontWeight: 600,
+        margin: "0 0 6px", fontFamily: FONT_UI,
+      }}>Connection Error</p>
+      <p style={{
+        color: C.label, fontSize: "0.72rem", lineHeight: 1.5,
+        margin: 0, fontFamily: FONT_UI,
+      }}>{message}</p>
       <button
         onClick={onRetry}
         style={{
           marginTop: 12, padding: "6px 18px", borderRadius: 10,
           background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.14)",
-          color: C.white, fontSize: "0.7rem", letterSpacing: "0.08em", cursor: "pointer", fontFamily: FONT_UI,
+          color: C.white, fontSize: "0.7rem", letterSpacing: "0.08em",
+          cursor: "pointer", fontFamily: FONT_UI,
         }}
       >
         RETRY
@@ -457,15 +635,23 @@ function TabError({ message, onRetry }) {
 }
 
 function TabEmpty({ icon, title, sub }) {
+  const { accentDim, accentBdr } = useTheme();
   return (
-    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", padding: "64px 0", gap: 12 }}>
+    <div style={{
+      display: "flex", flexDirection: "column",
+      alignItems: "center", padding: "64px 0", gap: 12,
+    }}>
       <div style={{
         width: 56, height: 56, borderRadius: "50%",
-        background: "rgba(0,255,65,0.06)", border: "1px solid rgba(0,255,65,0.2)",
-        display: "flex", alignItems: "center", justifyContent: "center", fontSize: "1.5rem",
+        background: accentDim, border: `1px solid ${accentBdr}`,
+        display: "flex", alignItems: "center", justifyContent: "center",
+        fontSize: "1.5rem",
       }}>{icon}</div>
       <div style={{ textAlign: "center" }}>
-        <p style={{ color: C.label, fontSize: "0.8rem", letterSpacing: "0.05em", margin: "0 0 4px", fontFamily: FONT_UI }}>{title}</p>
+        <p style={{
+          color: C.label, fontSize: "0.8rem", letterSpacing: "0.05em",
+          margin: "0 0 4px", fontFamily: FONT_UI,
+        }}>{title}</p>
         <p style={{ color: C.sub, fontSize: "0.68rem", margin: 0, fontFamily: FONT_UI }}>{sub}</p>
       </div>
     </div>
@@ -473,13 +659,93 @@ function TabEmpty({ icon, title, sub }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Summary tab  (UNCHANGED)
+//  SummaryTab — Oanda or Bybit UTA, selected by isCrypto
 // ─────────────────────────────────────────────────────────────────────────────
-function SummaryTab({ account, loading, error, onRetry }) {
+function SummaryTab({ account, loading, error, onRetry, isCrypto, accent, accentDim, accentBdr }) {
   if (loading) return <TabLoading />;
   if (error)   return <TabError message={error} onRetry={onRetry} />;
   if (!account) return null;
 
+  // ── BYBIT Unified Trading Account ──────────────────────────────────────────
+  if (isCrypto) {
+    const equity    = parseFloat(account.totalEquity          ?? 0);
+    const margin    = parseFloat(account.totalMarginBalance    ?? 0);
+    const available = parseFloat(account.totalAvailableBalance ?? 0);
+    const upl       = parseFloat(account.totalPerpUPL          ?? 0);
+    const accType   = typeof account.accountType === "string"
+      ? account.accountType : "UNIFIED";
+
+    const stats = [
+      { label: "Total Equity",    value: `$${equity.toFixed(2)}` },
+      { label: "Margin Balance",  value: `$${margin.toFixed(2)}` },
+      { label: "Unrealised P&L",  value: `$${upl.toFixed(2)}`, pnl: true },
+      { label: "Available",       value: `$${available.toFixed(2)}` },
+      { label: "Margin Used",     value: `$${Math.max(margin - available, 0).toFixed(2)}` },
+      { label: "Account Type",    value: accType },
+    ];
+
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        {/* Account header card */}
+        <div style={{
+          padding: 16, borderRadius: 16,
+          background: "rgba(255,165,0,0.04)",
+          border: `1px solid ${accentBdr}`,
+        }}>
+          <p style={{
+            color: C.label, fontSize: "0.62rem",
+            letterSpacing: "0.1em", margin: "0 0 6px", fontFamily: FONT_UI,
+          }}>ACCOUNT TYPE</p>
+          <p style={{
+            color: accent, fontSize: "0.85rem", fontWeight: 700,
+            fontFamily: FONT_MONO, margin: "0 0 4px",
+          }}>
+            {accType}
+          </p>
+          <p style={{
+            color: C.label, fontSize: "0.7rem",
+            textTransform: "capitalize", margin: 0, fontFamily: FONT_UI,
+          }}>
+            Bybit Unified Trading Account
+          </p>
+        </div>
+
+        {/* Stats grid */}
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+          {stats.map((stat, i) => {
+            const pnlVal   = stat.pnl ? parseFloat(stat.value.replace("$", "")) : null;
+            const valColor = pnlVal !== null ? (pnlVal >= 0 ? C.green : C.red) : C.white;
+            return (
+              <motion.div
+                key={stat.label}
+                initial={{ opacity: 0, y: 8 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: i * 0.04 }}
+                style={{
+                  padding: 14, borderRadius: 14,
+                  background: C.card, border: `1px solid ${C.cardBdr}`,
+                }}
+              >
+                <p style={{
+                  color: C.label, fontSize: "0.6rem",
+                  letterSpacing: "0.1em", margin: "0 0 8px", fontFamily: FONT_UI,
+                }}>
+                  {stat.label.toUpperCase()}
+                </p>
+                <p style={{
+                  color: valColor, fontSize: "1.05rem", fontWeight: 700,
+                  fontFamily: FONT_MONO, margin: 0,
+                  textShadow: stat.pnl ? `0 0 8px ${valColor}60` : "none",
+                }}>{stat.value}</p>
+              </motion.div>
+            );
+          })}
+        </div>
+      </div>
+    );
+  }
+
+  // ── OANDA account (UNCHANGED layout) ───────────────────────────────────────
   const stats = [
     { label: "Balance",        value: `$${parseFloat(account.balance ?? 0).toFixed(2)}` },
     { label: "NAV",            value: `$${parseFloat(account.NAV ?? 0).toFixed(2)}` },
@@ -495,18 +761,24 @@ function SummaryTab({ account, loading, error, onRetry }) {
         padding: 16, borderRadius: 16,
         background: "rgba(0,255,65,0.04)", border: `1px solid ${C.greenBdr}`,
       }}>
-        <p style={{ color: C.label, fontSize: "0.62rem", letterSpacing: "0.1em", margin: "0 0 6px", fontFamily: FONT_UI }}>ACCOUNT ID</p>
+        <p style={{
+          color: C.label, fontSize: "0.62rem",
+          letterSpacing: "0.1em", margin: "0 0 6px", fontFamily: FONT_UI,
+        }}>ACCOUNT ID</p>
         <p style={{
           color: C.green, fontSize: "0.85rem", fontWeight: 700,
           fontFamily: FONT_MONO, margin: "0 0 4px",
         }}>{account.id}</p>
-        <p style={{ color: C.label, fontSize: "0.7rem", textTransform: "capitalize", margin: 0, fontFamily: FONT_UI }}>
+        <p style={{
+          color: C.label, fontSize: "0.7rem",
+          textTransform: "capitalize", margin: 0, fontFamily: FONT_UI,
+        }}>
           {account.type?.toLowerCase() ?? "—"} account
         </p>
       </div>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
         {stats.map((stat, i) => {
-          const pnlVal   = stat.pnl ? parseFloat(stat.value.replace("$","")) : null;
+          const pnlVal   = stat.pnl ? parseFloat(stat.value.replace("$", "")) : null;
           const valColor = pnlVal !== null ? (pnlVal >= 0 ? C.green : C.red) : C.white;
           return (
             <motion.div
@@ -519,7 +791,10 @@ function SummaryTab({ account, loading, error, onRetry }) {
                 background: C.card, border: `1px solid ${C.cardBdr}`,
               }}
             >
-              <p style={{ color: C.label, fontSize: "0.6rem", letterSpacing: "0.1em", margin: "0 0 8px", fontFamily: FONT_UI }}>
+              <p style={{
+                color: C.label, fontSize: "0.6rem",
+                letterSpacing: "0.1em", margin: "0 0 8px", fontFamily: FONT_UI,
+              }}>
                 {stat.label.toUpperCase()}
               </p>
               <p style={{
@@ -536,80 +811,118 @@ function SummaryTab({ account, loading, error, onRetry }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Open Trades tab  ← ACCORDION ADDED
+//  Open Trades tab — Oanda or Bybit positions, selected by isCrypto
 // ─────────────────────────────────────────────────────────────────────────────
-function OpenTradesTab({ trades, loading, error, onRetry }) {
+function OpenTradesTab({ trades, loading, error, onRetry, isCrypto, accent }) {
   const [openId, setOpenId] = useState(null);
 
   if (loading) return <TabLoading />;
   if (error)   return <TabError message={error} onRetry={onRetry} />;
-  if (!trades.length) return <TabEmpty icon="📭" title="No open positions" sub="Live trades will appear here once placed" />;
+  if (!trades.length) return (
+    <TabEmpty
+      icon="📭"
+      title="No open positions"
+      sub={isCrypto
+        ? "Live Bybit positions will appear here"
+        : "Live trades will appear here once placed"}
+    />
+  );
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
       {trades.map((t, i) => {
-        const units    = parseInt(t.currentUnits ?? t.initialUnits ?? 0);
-        const isLong   = units > 0;
-        const pnl      = parseFloat(t.unrealizedPL ?? 0);
-        const pnlColor = pnl >= 0 ? C.green : C.red;
-        const ins      = (t.instrument ?? "").replace("_", "/");
-        const isOpen   = openId === t.id;
+        // ── Normalize display fields for BOTH engines ──────────────────────
+        const norm = isCrypto
+          ? {
+              id:      t.symbol ?? String(i),
+              ins:     typeof t.symbol === "string"
+                         ? t.symbol.replace(/USDT$/, "/USDT").replace(/USDC$/, "/USDC")
+                         : "—",
+              isLong:  (typeof t.side === "string" ? t.side : "") === "Buy",
+              units:   Math.abs(parseFloat(t.size ?? t.qty ?? 0)),
+              entryFmt: parseFloat(t.avgPrice ?? 0).toFixed(2),
+              risk:    `$${parseFloat(t.positionValue ?? t.posValue ?? 0).toFixed(2)}`,
+              riskLbl: "Pos. Value",
+              pnl:     parseFloat(t.unrealisedPnl ?? t.unrealizedPnl ?? 0),
+              openTs:  t.createdTime
+                         ? new Date(parseInt(t.createdTime)).toLocaleString()
+                         : "—",
+            }
+          : {
+              id:      t.id ?? String(i),
+              ins:     (t.instrument ?? "").replace("_", "/"),
+              isLong:  parseInt(t.currentUnits ?? t.initialUnits ?? 0) > 0,
+              units:   Math.abs(parseInt(t.currentUnits ?? t.initialUnits ?? 0)),
+              entryFmt: parseFloat(t.price ?? 0).toFixed(5),
+              risk:    `$${parseFloat(t.marginUsed ?? 0).toFixed(2)}`,
+              riskLbl: "Margin",
+              pnl:     parseFloat(t.unrealizedPL ?? 0),
+              openTs:  t.openTime ? new Date(t.openTime).toLocaleString() : "—",
+            };
+
+        const pnlColor = norm.pnl >= 0 ? C.green : C.red;
+        const isOpen   = openId === norm.id;
 
         return (
           <motion.div
-            key={t.id}
+            key={norm.id}
             initial={{ opacity: 0, y: 8 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: i * 0.04 }}
             style={{
               borderRadius: 16, overflow: "hidden",
-              background:   C.card,
-              border:       `1px solid ${isOpen
-                ? (isLong ? C.greenBdr : "rgba(255,58,58,0.4)")
-                : (isLong ? "rgba(0,255,65,0.22)" : "rgba(255,58,58,0.22)")}`,
-              boxShadow: isOpen ? (isLong ? "0 0 20px rgba(0,255,65,0.07)" : "0 0 20px rgba(255,58,58,0.07)") : "none",
+              background: C.card,
+              border: `1px solid ${isOpen
+                ? (norm.isLong ? C.greenBdr : "rgba(255,58,58,0.4)")
+                : (norm.isLong ? "rgba(0,255,65,0.22)" : "rgba(255,58,58,0.22)")}`,
+              boxShadow: isOpen
+                ? (norm.isLong ? "0 0 20px rgba(0,255,65,0.07)" : "0 0 20px rgba(255,58,58,0.07)")
+                : "none",
             }}
           >
-            {/* Direction accent bar */}
             <div style={{
-              height:     2,
-              background: isLong
+              height: 2,
+              background: norm.isLong
                 ? "linear-gradient(90deg, transparent, #00FF41, transparent)"
                 : "linear-gradient(90deg, transparent, #FF3A3A, transparent)",
             }} />
 
-            {/* ── Tappable header row ───────────────────────────────────── */}
             <motion.div
               whileTap={{ scale: 0.99 }}
-              onClick={() => setOpenId(isOpen ? null : t.id)}
+              onClick={() => setOpenId(isOpen ? null : norm.id)}
               style={{ padding: 14, cursor: "pointer" }}
             >
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+              <div style={{
+                display: "flex", alignItems: "center",
+                justifyContent: "space-between", marginBottom: 12,
+              }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <span style={{ color: C.white, fontWeight: 700, fontSize: "0.95rem", fontFamily: FONT_UI }}>{ins}</span>
+                  <span style={{
+                    color: C.white, fontWeight: 700,
+                    fontSize: "0.95rem", fontFamily: FONT_UI,
+                  }}>{norm.ins}</span>
                   <span style={{
                     padding: "2px 8px", borderRadius: 6,
                     fontSize: "0.62rem", fontWeight: 700, letterSpacing: "0.07em",
-                    color:       isLong ? C.green : C.red,
-                    background:  isLong ? "rgba(0,255,65,0.12)" : "rgba(255,58,58,0.12)",
-                    border:      `1px solid ${isLong ? C.greenBdr : "rgba(255,58,58,0.3)"}`,
-                    fontFamily:  FONT_UI,
+                    color:      norm.isLong ? C.green : C.red,
+                    background: norm.isLong ? "rgba(0,255,65,0.12)" : "rgba(255,58,58,0.12)",
+                    border:     `1px solid ${norm.isLong ? C.greenBdr : "rgba(255,58,58,0.3)"}`,
+                    fontFamily: FONT_UI,
                   }}>
-                    {isLong ? "▲ LONG" : "▼ SHORT"}
+                    {norm.isLong ? "▲ LONG" : "▼ SHORT"}
                   </span>
                 </div>
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                   <span style={{
-                    color: pnlColor, fontWeight: 700, fontSize: "0.9rem",
-                    fontFamily: FONT_MONO,
+                    color: pnlColor, fontWeight: 700,
+                    fontSize: "0.9rem", fontFamily: FONT_MONO,
                   }}>
-                    {pnl >= 0 ? "+" : ""}{pnl.toFixed(2)}
+                    {norm.pnl >= 0 ? "+" : ""}{norm.pnl.toFixed(2)}
                   </span>
-                  {/* Chevron */}
                   <motion.div
                     animate={{ rotate: isOpen ? 180 : 0 }}
                     transition={{ duration: 0.2 }}
-                    style={{ color: isOpen ? (isLong ? C.green : C.red) : C.sub }}
+                    style={{ color: isOpen ? (norm.isLong ? C.green : C.red) : C.sub }}
                   >
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
                       <polyline points="6 9 12 15 18 9"/>
@@ -621,18 +934,24 @@ function OpenTradesTab({ trades, loading, error, onRetry }) {
               {/* Mini stat row */}
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
                 {[
-                  { label: "Units",  value: Math.abs(units).toLocaleString() },
-                  { label: "Entry",  value: parseFloat(t.price ?? 0).toFixed(5) },
-                  { label: "Margin", value: `$${parseFloat(t.marginUsed ?? 0).toFixed(2)}` },
+                  { label: "Units",      value: norm.units.toLocaleString() },
+                  { label: "Entry",      value: norm.entryFmt },
+                  { label: norm.riskLbl, value: norm.risk },
                 ].map(({ label, value }) => (
                   <div key={label} style={{
                     padding: "8px 6px", borderRadius: 10, textAlign: "center",
                     background: C.sheet, border: `1px solid ${C.cardBdr}`,
                   }}>
-                    <p style={{ color: C.label, fontSize: "0.58rem", letterSpacing: "0.08em", margin: "0 0 4px", fontFamily: FONT_UI }}>
+                    <p style={{
+                      color: C.label, fontSize: "0.58rem",
+                      letterSpacing: "0.08em", margin: "0 0 4px", fontFamily: FONT_UI,
+                    }}>
                       {label.toUpperCase()}
                     </p>
-                    <p style={{ color: C.white, fontSize: "0.72rem", fontWeight: 600, fontFamily: FONT_MONO, margin: 0 }}>
+                    <p style={{
+                      color: C.white, fontSize: "0.72rem",
+                      fontWeight: 600, fontFamily: FONT_MONO, margin: 0,
+                    }}>
                       {value}
                     </p>
                   </div>
@@ -640,11 +959,11 @@ function OpenTradesTab({ trades, loading, error, onRetry }) {
               </div>
 
               <p style={{ color: C.sub, fontSize: "0.62rem", marginTop: 10, fontFamily: FONT_UI }}>
-                Opened {new Date(t.openTime).toLocaleString()}
+                Opened {norm.openTs}
               </p>
             </motion.div>
 
-            {/* ── Accordion: Trade Detail Card ─────────────────────────── */}
+            {/* Accordion: Trade Detail Card */}
             <AnimatePresence initial={false}>
               {isOpen && (
                 <motion.div
@@ -654,7 +973,7 @@ function OpenTradesTab({ trades, loading, error, onRetry }) {
                   transition={{ duration: 0.26, ease: [0.32, 0.72, 0, 1] }}
                   style={{ overflow: "hidden" }}
                 >
-                  <TradeDetailCard trade={t} kind="open" />
+                  <TradeDetailCard trade={t} kind="open" isCrypto={isCrypto} />
                 </motion.div>
               )}
             </AnimatePresence>
@@ -666,61 +985,90 @@ function OpenTradesTab({ trades, loading, error, onRetry }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  History tab  ← ACCORDION ADDED
+//  History tab — Oanda or Bybit closed trades, selected by isCrypto
 // ─────────────────────────────────────────────────────────────────────────────
-function HistoryTab({ history, loading, error, onRetry }) {
+function HistoryTab({ history, loading, error, onRetry, isCrypto, accent }) {
   const [openId, setOpenId] = useState(null);
 
   if (loading) return <TabLoading />;
   if (error)   return <TabError message={error} onRetry={onRetry} />;
-  if (!history.length) return <TabEmpty icon="📜" title="No closed trades" sub="Your trade history will appear here" />;
+  if (!history.length) return (
+    <TabEmpty
+      icon="📜"
+      title="No closed trades"
+      sub={isCrypto
+        ? "Your Bybit trade history will appear here"
+        : "Your trade history will appear here"}
+    />
+  );
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
       {history.map((t, i) => {
-        const units    = parseInt(t.initialUnits ?? 0);
-        const isLong   = units > 0;
-        const pnl      = parseFloat(t.realizedPL ?? 0);
-        const pnlColor = pnl >= 0 ? C.green : C.red;
-        const ins      = (t.instrument ?? "").replace("_", "/");
-        const isOpen   = openId === t.id;
+        // ── Normalize display fields ───────────────────────────────────────
+        const norm = isCrypto
+          ? {
+              id:       t.orderId ?? t.tradeId ?? String(i),
+              ins:      typeof t.symbol === "string"
+                          ? t.symbol.replace(/USDT$/, "/USDT").replace(/USDC$/, "/USDC")
+                          : "—",
+              isLong:   (typeof t.side === "string" ? t.side : "") === "Buy",
+              units:    Math.abs(parseFloat(t.qty ?? t.size ?? 0)),
+              pnl:      parseFloat(t.closedPnl ?? t.realizedPnl ?? 0),
+              closeDateStr: t.updatedTime
+                              ? new Date(parseInt(t.updatedTime)).toLocaleDateString()
+                              : "—",
+            }
+          : {
+              id:       t.id ?? String(i),
+              ins:      (t.instrument ?? "").replace("_", "/"),
+              isLong:   parseInt(t.initialUnits ?? 0) > 0,
+              units:    Math.abs(parseInt(t.initialUnits ?? 0)),
+              pnl:      parseFloat(t.realizedPL ?? 0),
+              closeDateStr: t.closeTime
+                              ? new Date(t.closeTime).toLocaleDateString()
+                              : "—",
+            };
+
+        const pnlColor = norm.pnl >= 0 ? C.green : C.red;
+        const isOpen   = openId === norm.id;
 
         return (
           <motion.div
-            key={t.id}
+            key={norm.id}
             initial={{ opacity: 0, y: 6 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: Math.min(i * 0.03, 0.3) }}
             style={{
               borderRadius: 14, overflow: "hidden",
-              background:   C.card,
-              border:       `1px solid ${isOpen ? (pnl >= 0 ? C.greenBdr : "rgba(255,58,58,0.4)") : C.cardBdr}`,
-              boxShadow:    isOpen ? `0 0 16px ${pnlColor}10` : "none",
+              background: C.card,
+              border: `1px solid ${isOpen
+                ? (norm.pnl >= 0 ? C.greenBdr : "rgba(255,58,58,0.4)")
+                : C.cardBdr}`,
+              boxShadow: isOpen ? `0 0 16px ${pnlColor}10` : "none",
             }}
           >
-            {/* ── Tappable summary row ──────────────────────────────────── */}
             <motion.div
               whileTap={{ scale: 0.99 }}
-              onClick={() => setOpenId(isOpen ? null : t.id)}
+              onClick={() => setOpenId(isOpen ? null : norm.id)}
               style={{
-                display:    "flex",
-                alignItems: "center",
-                gap:        12,
-                padding:    "12px 14px",
-                cursor:     "pointer",
+                display: "flex", alignItems: "center",
+                gap: 12, padding: "12px 14px", cursor: "pointer",
               }}
             >
-              {/* Direction dot */}
               <div style={{
                 width: 8, height: 8, borderRadius: "50%", flexShrink: 0,
-                background: isLong ? C.green : C.red,
-                boxShadow:  `0 0 6px ${isLong ? C.green : C.red}`,
+                background: norm.isLong ? C.green : C.red,
+                boxShadow: `0 0 6px ${norm.isLong ? C.green : C.red}`,
               }} />
 
               <div style={{ flex: 1, minWidth: 0 }}>
-                <p style={{ color: C.white, fontSize: "0.88rem", fontWeight: 600, margin: "0 0 3px", fontFamily: FONT_UI }}>{ins}</p>
+                <p style={{
+                  color: C.white, fontSize: "0.88rem",
+                  fontWeight: 600, margin: "0 0 3px", fontFamily: FONT_UI,
+                }}>{norm.ins}</p>
                 <p style={{ color: C.sub, fontSize: "0.62rem", margin: 0, fontFamily: FONT_UI }}>
-                  {isLong ? "Long" : "Short"} · {Math.abs(units).toLocaleString()} units
+                  {norm.isLong ? "Long" : "Short"} · {norm.units.toLocaleString()} {isCrypto ? "qty" : "units"}
                 </p>
               </div>
 
@@ -731,13 +1079,12 @@ function HistoryTab({ history, loading, error, onRetry }) {
                     fontFamily: FONT_MONO,
                     textShadow: `0 0 6px ${pnlColor}60`, margin: "0 0 3px",
                   }}>
-                    {pnl >= 0 ? "+" : ""}{pnl.toFixed(2)}
+                    {norm.pnl >= 0 ? "+" : ""}{norm.pnl.toFixed(2)}
                   </p>
                   <p style={{ color: C.sub, fontSize: "0.6rem", margin: 0, fontFamily: FONT_UI }}>
-                    {t.closeTime ? new Date(t.closeTime).toLocaleDateString() : "—"}
+                    {norm.closeDateStr}
                   </p>
                 </div>
-                {/* Chevron */}
                 <motion.div
                   animate={{ rotate: isOpen ? 180 : 0 }}
                   transition={{ duration: 0.2 }}
@@ -750,7 +1097,6 @@ function HistoryTab({ history, loading, error, onRetry }) {
               </div>
             </motion.div>
 
-            {/* ── Accordion: Trade Detail Card ─────────────────────────── */}
             <AnimatePresence initial={false}>
               {isOpen && (
                 <motion.div
@@ -760,7 +1106,7 @@ function HistoryTab({ history, loading, error, onRetry }) {
                   transition={{ duration: 0.26, ease: [0.32, 0.72, 0, 1] }}
                   style={{ overflow: "hidden" }}
                 >
-                  <TradeDetailCard trade={t} kind="history" />
+                  <TradeDetailCard trade={t} kind="history" isCrypto={isCrypto} />
                 </motion.div>
               )}
             </AnimatePresence>
@@ -772,65 +1118,142 @@ function HistoryTab({ history, loading, error, onRetry }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  TradeDetailCard — compact accordion panel · mobile-first
-//
-//  5 sections, all with tight padding so the card stays readable without
-//  requiring the user to scroll past it on a phone screen:
-//   1. Confluence banner  (icon · reason · badges)
-//   2. P&L hero           (large number, tinted background)
-//   3. Core metrics row   (Units · Entry · Risk)  — 3-col grid
-//   4. Execution row      (SL · TP · Close/Live)  — 3-col grid
-//   5. Timestamps         (Opened + Closed + duration pill + trade ID)
+//  normalizeTrade — maps both Oanda and Bybit trade shapes to a common schema.
+//  All Bybit fields are parsed with strict null-checks to prevent crashes if
+//  the backend returns missing or differently-named keys.
 // ─────────────────────────────────────────────────────────────────────────────
-function TradeDetailCard({ trade: t, kind }) {
+function normalizeTrade(t, isCrypto, kind) {
   const isHistory = kind === "history";
 
-  // Direction
-  const rawUnits = parseInt(
-    isHistory ? (t.initialUnits ?? 0) : (t.currentUnits ?? t.initialUnits ?? 0)
-  );
-  const isLong   = rawUnits > 0;
-  const units    = Math.abs(rawUnits);
+  if (!isCrypto) {
+    // ── OANDA ─────────────────────────────────────────────────────────────
+    const rawUnits = parseInt(
+      isHistory ? (t.initialUnits ?? 0) : (t.currentUnits ?? t.initialUnits ?? 0)
+    );
+    const pnl = parseFloat(
+      isHistory ? (t.realizedPL ?? 0) : (t.unrealizedPL ?? 0)
+    );
+    const financing  = parseFloat(t.financing  ?? 0);
+    const commission = parseFloat(t.commission ?? 0);
+    const margin     = parseFloat(t.marginUsed ?? 0);
+
+    return {
+      instrument: (t.instrument ?? "").replace("_", "/"),
+      isLong:     rawUnits > 0,
+      units:      Math.abs(rawUnits),
+      pnl,
+      pnlLabel:   isHistory ? "Realized P&L" : "Unrealized P&L",
+      entryPx:    parseFloat(t.price ?? 0),
+      closePx:    parseFloat(t.averageClosePrice ?? 0),
+      slPx:       parseFloat(t.stopLossOrder?.price    ?? t.stopLossOrderID   ?? 0),
+      tpPx:       parseFloat(t.takeProfitOrder?.price  ?? t.takeProfitOrderID ?? 0),
+      riskAmt:    isHistory ? Math.abs(financing + commission) : margin,
+      riskLabel:  isHistory ? "Fees & Fin." : "Margin",
+      conflTitle: rawUnits > 0 ? "SMC Bullish Order Block" : "SMC Bearish Order Block",
+      conflSub:   rawUnits > 0
+        ? "Demand Zone · Above 200 EMA · CHoCH confirmed"
+        : "Supply Zone · Below 200 EMA · CHoCH confirmed",
+      openDt:  t.openTime  ? new Date(t.openTime)  : null,
+      closeDt: t.closeTime ? new Date(t.closeTime) : null,
+      id:      t.id ?? null,
+      engine:  "oanda",
+    };
+  }
+
+  // ── BYBIT — strict null-checks on every field ────────────────────────────
+  const side   = typeof t.side === "string" ? t.side : "";
+  const isLong = side === "Buy";
+  const sym    = typeof t.symbol === "string"
+    ? t.symbol.replace(/USDT$/, "/USDT").replace(/USDC$/, "/USDC")
+    : "—";
+
+  if (isHistory) {
+    // Bybit closed PnL record
+    const qty       = Math.abs(parseFloat(t.qty    ?? t.size ?? 0));
+    const closedPnl = parseFloat(t.closedPnl ?? t.realizedPnl ?? 0);
+    const entryPx   = parseFloat(t.avgEntryPrice ?? t.price ?? 0);
+    const exitPx    = parseFloat(t.avgExitPrice  ?? t.closedPrice ?? 0);
+    const openMs    = parseInt(t.createdTime ?? t.openTime  ?? 0);
+    const closeMs   = parseInt(t.updatedTime ?? t.closeTime ?? 0);
+
+    return {
+      instrument: sym,
+      isLong,
+      units:      qty,
+      pnl:        closedPnl,
+      pnlLabel:   "Realized P&L",
+      entryPx,
+      closePx:    exitPx,
+      slPx:       0,    // Bybit closed PnL records don't carry SL/TP
+      tpPx:       0,
+      riskAmt:    parseFloat(t.closingFee ?? t.commission ?? 0),
+      riskLabel:  "Closing Fee",
+      conflTitle: isLong ? "Bybit Long Position" : "Bybit Short Position",
+      conflSub:   sym + (isLong ? " · Long · Closed" : " · Short · Closed"),
+      openDt:     openMs  > 0 ? new Date(openMs)  : null,
+      closeDt:    closeMs > 0 ? new Date(closeMs) : null,
+      id:         t.orderId ?? t.tradeId ?? null,
+      engine:     "bybit",
+    };
+  }
+
+  // Bybit open position
+  const size      = Math.abs(parseFloat(t.size      ?? t.qty           ?? 0));
+  const unrealPnl = parseFloat(t.unrealisedPnl ?? t.unrealizedPnl   ?? 0);
+  const avgPrice  = parseFloat(t.avgPrice       ?? t.entryPrice       ?? 0);
+  const posVal    = parseFloat(t.positionValue   ?? t.posValue         ?? 0);
+  const slPx      = parseFloat(t.stopLoss        ?? 0);
+  const tpPx      = parseFloat(t.takeProfit      ?? 0);
+  const openMs    = parseInt(t.createdTime        ?? t.openTime         ?? 0);
+
+  return {
+    instrument: sym,
+    isLong,
+    units:      size,
+    pnl:        unrealPnl,
+    pnlLabel:   "Unrealized P&L",
+    entryPx:    avgPrice,
+    closePx:    0,
+    slPx,
+    tpPx,
+    riskAmt:    posVal,
+    riskLabel:  "Pos. Value",
+    conflTitle: isLong ? "Bybit Long Position" : "Bybit Short Position",
+    conflSub:   sym + (isLong ? " · Long · Live" : " · Short · Live"),
+    openDt:     openMs > 0 ? new Date(openMs) : null,
+    closeDt:    null,
+    id:         t.positionIdx != null ? String(t.positionIdx) : t.symbol ?? null,
+    engine:     "bybit",
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  TradeDetailCard — compact accordion panel · mobile-first
+//  Handles BOTH Oanda and Bybit trade shapes via normalizeTrade().
+//  The render section below is engine-agnostic: it only uses `norm.*` fields.
+// ─────────────────────────────────────────────────────────────────────────────
+function TradeDetailCard({ trade: t, kind, isCrypto = false }) {
+  const norm      = normalizeTrade(t, isCrypto, kind);
+  const isHistory = kind === "history";
+
+  const {
+    instrument, isLong, units, pnl, pnlLabel,
+    entryPx, closePx, slPx, tpPx, riskAmt, riskLabel,
+    conflTitle, conflSub, openDt, closeDt, id,
+  } = norm;
+
+  const pnlColor = pnl >= 0 ? C.green : C.red;
+  const pnlSign  = pnl >= 0 ? "+" : "";
   const dirColor = isLong ? C.green : C.red;
 
-  // P&L
-  const pnl      = parseFloat(isHistory ? (t.realizedPL ?? 0) : (t.unrealizedPL ?? 0));
-  const pnlColor = pnl >= 0 ? C.green : C.red;
-  const pnlLabel = isHistory ? "Realized P&L" : "Unrealized P&L";
-  const pnlSign  = pnl >= 0 ? "+" : "";
-
-  // Prices
-  const entryPx = parseFloat(t.price ?? 0);
-  const closePx = parseFloat(t.averageClosePrice ?? 0);
-  const slPx    = parseFloat(t.stopLossOrder?.price    ?? t.stopLossOrderID   ?? 0);
-  const tpPx    = parseFloat(t.takeProfitOrder?.price  ?? t.takeProfitOrderID ?? 0);
-
-  // Risk
-  const margin     = parseFloat(t.marginUsed  ?? 0);
-  const financing  = parseFloat(t.financing   ?? 0);
-  const commission = parseFloat(t.commission  ?? 0);
-  const riskAmt    = isHistory ? Math.abs(financing + commission) : margin;
-  const riskLabel  = isHistory ? "Fees & Fin." : "Margin";
-
-  // Confluence labels
-  const conflTitle = isLong ? "SMC Bullish Order Block" : "SMC Bearish Order Block";
-  const conflSub   = isLong
-    ? "Demand Zone · Above 200 EMA · CHoCH confirmed"
-    : "Supply Zone · Below 200 EMA · CHoCH confirmed";
-
-  // Timestamps
-  const openDt     = t.openTime  ? new Date(t.openTime)  : null;
-  const closeDt    = t.closeTime ? new Date(t.closeTime) : null;
   const durationMs = openDt && closeDt ? closeDt - openDt : null;
 
-  // Compact date+time on one line: "28 Oct 24 · 14:32"
   const fmtStamp = (d) => d
     ? d.toLocaleDateString(undefined, { day: "2-digit", month: "short", year: "2-digit" }) +
       " · " +
       d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })
     : "—";
 
-  // Price precision
   const dec = entryPx > 1000 ? 1 : entryPx > 100 ? 2 : 5;
   const fmt = (n) => n > 0 ? n.toFixed(dec) : "—";
 
@@ -843,7 +1266,7 @@ function TradeDetailCard({ trade: t, kind }) {
       background:   C.sheet,
     }}>
 
-      {/* ── 1. CONFLUENCE BANNER ─────────────────────────────────────────── */}
+      {/* ── 1. BANNER ───────────────────────────────────────────────────── */}
       <div style={{
         display:      "flex",
         alignItems:   "center",
@@ -852,7 +1275,6 @@ function TradeDetailCard({ trade: t, kind }) {
         borderBottom: `1px solid ${C.cardBdr}`,
         background:   isLong ? "rgba(0,255,65,0.03)" : "rgba(255,58,58,0.03)",
       }}>
-        {/* Icon */}
         <div style={{
           width: 32, height: 32, borderRadius: 9, flexShrink: 0,
           display: "flex", alignItems: "center", justifyContent: "center",
@@ -860,11 +1282,10 @@ function TradeDetailCard({ trade: t, kind }) {
           background: isLong ? "rgba(0,255,65,0.1)" : "rgba(255,58,58,0.1)",
           border: `1px solid ${isLong ? C.greenBdr : "rgba(255,58,58,0.3)"}`,
         }}>
-          {isLong ? "📈" : "📉"}
+          {isCrypto ? (isLong ? "₿" : "₿") : (isLong ? "📈" : "📉")}
         </div>
 
         <div style={{ flex: 1, minWidth: 0 }}>
-          {/* Title + badges on one line */}
           <div style={{ display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap", marginBottom: 2 }}>
             <span style={{
               color: C.white, fontSize: "0.78rem", fontWeight: 700,
@@ -875,21 +1296,25 @@ function TradeDetailCard({ trade: t, kind }) {
             <span style={{
               padding: "1px 5px", borderRadius: 4, fontSize: "0.52rem",
               fontWeight: 700, letterSpacing: "0.08em",
-              color: C.amber, background: "rgba(255,184,0,0.1)",
-              border: "1px solid rgba(255,184,0,0.28)", fontFamily: FONT_UI,
-            }}>SMC/ICT</span>
+              color:       C.amber,
+              background:  "rgba(255,184,0,0.1)",
+              border:      "1px solid rgba(255,184,0,0.28)", fontFamily: FONT_UI,
+            }}>{isCrypto ? "BYBIT" : "SMC/ICT"}</span>
             <span style={{
               padding: "1px 5px", borderRadius: 4, fontSize: "0.52rem",
               fontWeight: 700, letterSpacing: "0.08em",
-              color: dirColor,
+              color:      dirColor,
               background: isLong ? "rgba(0,255,65,0.1)" : "rgba(255,58,58,0.1)",
-              border: `1px solid ${isLong ? C.greenBdr : "rgba(255,58,58,0.3)"}`,
+              border:     `1px solid ${isLong ? C.greenBdr : "rgba(255,58,58,0.3)"}`,
               fontFamily: FONT_UI,
             }}>
               {isLong ? "▲ LONG" : "▼ SHORT"}
             </span>
           </div>
-          <p style={{ color: C.sub, fontSize: "0.6rem", margin: 0, fontFamily: FONT_UI, lineHeight: 1.3 }}>
+          <p style={{
+            color: C.sub, fontSize: "0.6rem", margin: 0,
+            fontFamily: FONT_UI, lineHeight: 1.3,
+          }}>
             {conflSub}
           </p>
         </div>
@@ -904,7 +1329,6 @@ function TradeDetailCard({ trade: t, kind }) {
         position:     "relative",
         overflow:     "hidden",
       }}>
-        {/* Glow orb */}
         <div style={{
           position: "absolute", top: "50%", left: "50%",
           transform: "translate(-50%,-50%)",
@@ -926,7 +1350,6 @@ function TradeDetailCard({ trade: t, kind }) {
         }}>
           {pnlLabel}
         </p>
-        {/* Colour bar */}
         <div style={{
           position: "absolute", bottom: 0, left: 0, right: 0, height: 2,
           background: pnl >= 0
@@ -941,9 +1364,9 @@ function TradeDetailCard({ trade: t, kind }) {
         borderBottom: `1px solid ${C.cardBdr}`,
       }}>
         {[
-          { label: "Units",       value: units.toLocaleString(),                 color: C.white, icon: "◈" },
-          { label: "Entry",       value: fmt(entryPx),                           color: C.white, icon: "⤵" },
-          { label: riskLabel,     value: riskAmt > 0 ? `$${riskAmt.toFixed(2)}` : "—", color: C.amber, icon: "⚖" },
+          { label: "Units",     value: units.toLocaleString(),                    color: C.white, icon: "◈" },
+          { label: "Entry",     value: fmt(entryPx),                              color: C.white, icon: "⤵" },
+          { label: riskLabel,   value: riskAmt > 0 ? `$${riskAmt.toFixed(2)}` : "—", color: C.amber, icon: "⚖" },
         ].map(({ label, value, color, icon }, idx) => (
           <div key={label} style={{
             padding: "7px 6px", textAlign: "center",
@@ -966,18 +1389,17 @@ function TradeDetailCard({ trade: t, kind }) {
         ))}
       </div>
 
-      {/* ── 4. EXECUTION DETAILS — SL · TP · Close/Live ─────────────────── */}
+      {/* ── 4. EXECUTION — SL · TP · Close/Live ─────────────────────────── */}
       <div style={{
         display: "grid", gridTemplateColumns: "1fr 1fr 1fr",
         borderBottom: `1px solid ${C.cardBdr}`,
       }}>
         {[
-          { label: "Stop Loss",   value: fmt(slPx),   color: slPx > 0 ? C.red   : C.sub, icon: "🛑" },
-          { label: "Take Profit", value: tpPx > 0 ? fmt(tpPx) : "—",
-                                                       color: tpPx > 0 ? C.green : C.sub, icon: "🎯" },
+          { label: "Stop Loss",   value: fmt(slPx),              color: slPx > 0 ? C.red   : C.sub, icon: "🛑" },
+          { label: "Take Profit", value: tpPx > 0 ? fmt(tpPx) : "—", color: tpPx > 0 ? C.green : C.sub, icon: "🎯" },
           isHistory
-            ? { label: "Close",   value: fmt(closePx), color: C.label, icon: "⤴" }
-            : { label: "Live P&L", value: `${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}`, color: pnlColor, icon: "〜" },
+            ? { label: "Close",    value: fmt(closePx),           color: C.label,   icon: "⤴" }
+            : { label: "Live P&L", value: `${pnlSign}${pnl.toFixed(2)}`, color: pnlColor, icon: "〜" },
         ].map(({ label, value, color, icon }, idx) => (
           <div key={label} style={{
             padding: "7px 6px", textAlign: "center",
@@ -1000,10 +1422,9 @@ function TradeDetailCard({ trade: t, kind }) {
         ))}
       </div>
 
-      {/* ── 5. TIMESTAMPS — compact single-line format ───────────────────── */}
+      {/* ── 5. TIMESTAMPS ────────────────────────────────────────────────── */}
       <div style={{ padding: "7px 12px 8px", display: "flex", flexDirection: "column", gap: 4 }}>
 
-        {/* Opened */}
         {openDt && (
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <span style={{
@@ -1013,10 +1434,10 @@ function TradeDetailCard({ trade: t, kind }) {
               background: "rgba(255,255,255,0.04)", border: `1px solid ${C.cardBdr}`,
             }}>📂</span>
             <div style={{ minWidth: 0 }}>
-              <span style={{ color: C.sub, fontSize: "0.52rem", letterSpacing: "0.08em",
-                textTransform: "uppercase", marginRight: 5, fontFamily: FONT_UI }}>
-                Opened
-              </span>
+              <span style={{
+                color: C.sub, fontSize: "0.52rem", letterSpacing: "0.08em",
+                textTransform: "uppercase", marginRight: 5, fontFamily: FONT_UI,
+              }}>Opened</span>
               <span style={{ color: C.label, fontSize: "0.68rem", fontFamily: FONT_MONO }}>
                 {fmtStamp(openDt)}
               </span>
@@ -1024,7 +1445,6 @@ function TradeDetailCard({ trade: t, kind }) {
           </div>
         )}
 
-        {/* Closed (history only) */}
         {isHistory && closeDt && (
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <span style={{
@@ -1037,10 +1457,10 @@ function TradeDetailCard({ trade: t, kind }) {
               {pnl >= 0 ? "✅" : "🔒"}
             </span>
             <div style={{ minWidth: 0 }}>
-              <span style={{ color: C.sub, fontSize: "0.52rem", letterSpacing: "0.08em",
-                textTransform: "uppercase", marginRight: 5, fontFamily: FONT_UI }}>
-                Closed
-              </span>
+              <span style={{
+                color: C.sub, fontSize: "0.52rem", letterSpacing: "0.08em",
+                textTransform: "uppercase", marginRight: 5, fontFamily: FONT_UI,
+              }}>Closed</span>
               <span style={{ color: C.label, fontSize: "0.68rem", fontFamily: FONT_MONO }}>
                 {fmtStamp(closeDt)}
               </span>
@@ -1048,8 +1468,10 @@ function TradeDetailCard({ trade: t, kind }) {
           </div>
         )}
 
-        {/* Duration pill + Trade ID — same row */}
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 1 }}>
+        <div style={{
+          display: "flex", alignItems: "center",
+          justifyContent: "space-between", marginTop: 1,
+        }}>
           {durationMs && (
             <span style={{
               display: "inline-flex", alignItems: "center", gap: 4,
@@ -1061,9 +1483,9 @@ function TradeDetailCard({ trade: t, kind }) {
               ⏱ {formatDuration(durationMs)}
             </span>
           )}
-          {t.id && (
+          {id && (
             <span style={{ color: C.sub, fontSize: "0.55rem", fontFamily: FONT_MONO }}>
-              ID: {t.id}
+              ID: {id}
             </span>
           )}
         </div>
