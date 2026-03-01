@@ -5,8 +5,37 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-  <meta name="theme-color" content="#050505" />
+  <meta name="theme-color" content="#050505" id="theme-color-meta" />
   <title>FX Radiant</title>
+
+  <!--
+    ── ANTI-FLASH: Mode Detection Script ──────────────────────────────────────
+    Runs synchronously before ANY CSS or React code, so the very first paint
+    already uses the persisted appMode.  This eliminates the "flash of green"
+    on page refresh when the user is in CRYPTO mode.
+
+    What it does:
+      1. Reads fx-radiant-app-mode from localStorage (safe, try/catch)
+      2. Sets --accent and --accent-hdr CSS custom properties on :root
+      3. Sets data-mode on <html> so CSS selectors can target it
+      4. Updates the theme-color <meta> for mobile browser chrome
+  -->
+  <script>
+    (function () {
+      try {
+        var m = localStorage.getItem('fx-radiant-app-mode');
+        var isCrypto = m === 'CRYPTO';
+        var accent    = isCrypto ? '#FFA500' : '#00FF41';
+        var accentHdr = isCrypto ? 'rgba(255,165,0,0.08)' : 'rgba(0,255,65,0.08)';
+        var r = document.documentElement;
+        r.style.setProperty('--accent',     accent);
+        r.style.setProperty('--accent-hdr', accentHdr);
+        r.setAttribute('data-mode', isCrypto ? 'CRYPTO' : 'FOREX');
+        var tm = document.getElementById('theme-color-meta');
+        if (tm) tm.setAttribute('content', '#050505');
+      } catch (e) { /* storage unavailable — defaults are fine */ }
+    })();
+  </script>
 
   <!-- Fonts: Inter (UI) + JetBrains Mono (prices/numbers) -->
   <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -20,6 +49,11 @@
       --sab: env(safe-area-inset-bottom);
       --sal: env(safe-area-inset-left);
       --sar: env(safe-area-inset-right);
+
+      /* Fallback accent tokens — immediately overwritten by the anti-flash
+         script above for returning users.  New users default to FOREX green. */
+      --accent:     #00FF41;
+      --accent-hdr: rgba(0,255,65,0.08);
     }
     * { -webkit-tap-highlight-color: transparent; box-sizing: border-box; }
     html, body, #root {
@@ -34,6 +68,15 @@
     ::-webkit-scrollbar { width: 0; background: transparent; }
     .scrollbar-none { scrollbar-width: none; }
     .scrollbar-none::-webkit-scrollbar { display: none; }
+
+    /*
+      Pre-React border colour for the GlobalModeBar.
+      Before Zustand/React paint, the browser will briefly show this border.
+      The inline script above has already set --accent-hdr so this is correct.
+    */
+    #global-mode-bar {
+      border-bottom-color: var(--accent-hdr) !important;
+    }
   </style>
 </head>
 <body>
