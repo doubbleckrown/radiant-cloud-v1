@@ -1010,7 +1010,7 @@ function BybitTradingSettings({ marginType: initMarginType, leverage: initLevera
     setSaving(true);
     setSaveMsg(null);
     try {
-      await import("../services/api").then(({ default: api }) =>
+      await import("../utils/api").then(({ default: api }) =>
         api.patch("/bybit/settings", patch)
       );
       setSaveMsg("ok");
