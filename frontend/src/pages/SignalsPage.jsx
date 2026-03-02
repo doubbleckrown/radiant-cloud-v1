@@ -18,7 +18,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { motion, AnimatePresence }                   from "framer-motion";
 import { useAuthStore }                              from "../store/authStore";
 import { useTheme }                                  from "../hooks/useTheme";
-import api                                           from "../services/api";
+import api                                           from "../utils/api";
 
 // ── Colour tokens ─────────────────────────────────────────────────────────────
 const C = {
