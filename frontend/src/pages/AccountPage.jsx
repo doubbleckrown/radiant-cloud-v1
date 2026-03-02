@@ -2,16 +2,16 @@
  * AccountPage — Dual-Engine
  * ══════════════════════════════════════════════════════════════════════════════
  * FOREX mode  → Oanda v20  (account / trades / history)
- * CRYPTO mode → Bybit UTA  (bybit/account · bybit/account/positions · bybit/account/history)
+ * CRYPTO mode → Bybit Account  (bybit/account · bybit/account/positions · bybit/account/history)
  *
  * Architecture rules:
  *  • OANDA state  (account, trades, history, sparklinePoints) is NEVER mutated
  *    in CRYPTO mode.
- *  • BYBIT state  (bybitAccount, bybitPositions, bybitHistory, bybitSparkline)
+ *  • Bybit state  (bybitAccount, bybitPositions, bybitHistory, bybitSparkline)
  *    is NEVER mutated in FOREX mode.
  *  • loadOandaXxx() and loadBybitXxx() are fully separate functions — no
  *    nested if/else mixing the two engines.
- *  • All BYBIT requests include X-App-Mode: CRYPTO header.
+ *  • All Bybit requests include X-App-Mode: CRYPTO header.
  *  • normalizeTrade(t, isCrypto, kind) maps both trade shapes to a common schema
  *    so TradeDetailCard has zero mode-specific branches in its render.
  *  • Strict null-checks on every Bybit field to prevent black-screen crashes.
@@ -46,7 +46,7 @@ const FONT_MONO = "'JetBrains Mono', monospace";
 
 const TABS = ["Summary", "Open Trades", "History"];
 
-// ── Bybit API headers ──────────────────────────────────────────────────────────
+// ── Bybit API headers ─────────────────────────────────────────────────────────
 const BYBIT_HEADERS = { "X-App-Mode": "CRYPTO" };
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -69,7 +69,7 @@ export default function AccountPage() {
   const [history,         setHistory]         = useState([]);
   const [sparklinePoints, setSparklinePoints] = useState([]);
 
-  // ── BYBIT engine state (never mutated in FOREX mode) ──────────────────────
+  // ── Bybit engine state (never mutated in FOREX mode) ──────────────────────
   const [bybitAccount,   setBybitAccount]   = useState(null);
   const [bybitPositions, setBybitPositions] = useState([]);
   const [bybitHistory,   setBybitHistory]   = useState([]);
@@ -97,7 +97,7 @@ export default function AccountPage() {
       .catch(() => {});
   }, []); // eslint-disable-line
 
-  // ── BYBIT: eagerly load history for sparkline when entering CRYPTO mode ───
+  // ── Bybit: eagerly load history for sparkline when entering CRYPTO mode ───
   useEffect(() => {
     if (!isCrypto) return;             // ← isolated: never runs in FOREX mode
     if (bybitHistory.length > 0) return; // already loaded
@@ -131,7 +131,7 @@ export default function AccountPage() {
       if (activeTab === "Open Trades" && !trades.length) loadOandaTrades();
       if (activeTab === "History"     && !history.length) loadOandaHistory();
     } else {
-      // BYBIT engine
+      // Bybit engine
       if (activeTab === "Summary"     && !bybitAccount)            loadBybitAccount();
       if (activeTab === "Open Trades" && !bybitPositions.length)   loadBybitPositions();
       if (activeTab === "History"     && !bybitHistory.length)     loadBybitHistory();
@@ -163,7 +163,7 @@ export default function AccountPage() {
     catch (e) { mark("History", false, e.userMessage ?? "Could not load history"); }
   }, []);
 
-  // ── BYBIT load functions (new — strict null-checks throughout) ─────────────
+  // ── Bybit load functions ─────────────────────────────────────────────────
   const loadBybitAccount = useCallback(async () => {
     mark("Summary", true);
     try {
@@ -241,7 +241,7 @@ export default function AccountPage() {
               {isCrypto ? "Bybit Account" : "Account"}
             </h1>
             <p style={{ color: C.label, fontSize: "0.7rem", margin: "2px 0 0", fontFamily: FONT_UI }}>
-              {isCrypto ? "Bybit UTA · Live data" : "Oanda v20 · Live data"}
+              {isCrypto ? "Bybit V5 · Linear Perpetuals" : "Oanda v20 · Live data"}
             </p>
           </div>
 
@@ -272,7 +272,7 @@ export default function AccountPage() {
       {/* ── Content ────────────────────────────────────────────────────── */}
       <div style={{ padding: "16px 16px 32px", display: "flex", flexDirection: "column", gap: 12 }}>
 
-        {/* AUTO-TRADE TOGGLE — Oanda only; Bybit auto-trading in future sprint */}
+        {/* AUTO-TRADE TOGGLE — Oanda only; Bybit auto-trading */}
         {!isCrypto && (
           <AutoTradeToggle
             isOn={autoTradeOn}
@@ -551,14 +551,14 @@ function AutoTradeToggle({ isOn, toggling, error, onToggle }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  BybitAutoTradeNotice — placeholder shown in CRYPTO mode
+//  BybitAutoTradeNotice — shown in CRYPTO mode
 // ─────────────────────────────────────────────────────────────────────────────
 function BybitAutoTradeNotice() {
   return (
     <div style={{
       borderRadius: 16,
-      border:       "1px solid rgba(255,165,0,0.2)",
-      background:   "rgba(255,165,0,0.05)",
+      border:       "1px solid rgba(0,180,200,0.2)",
+      background:   "rgba(0,180,200,0.05)",
       padding:      "14px 16px",
       display:      "flex",
       alignItems:   "center",
@@ -568,12 +568,12 @@ function BybitAutoTradeNotice() {
         width: 36, height: 36, borderRadius: 10, flexShrink: 0,
         display: "flex", alignItems: "center", justifyContent: "center",
         fontSize: "1.1rem",
-        background: "rgba(255,165,0,0.1)",
-        border: "1px solid rgba(255,165,0,0.25)",
+        background: "rgba(0,180,200,0.1)",
+        border: "1px solid rgba(0,180,200,0.25)",
       }}>₿</div>
       <div>
         <p style={{
-          color: "#FFA500", fontSize: "0.82rem", fontWeight: 700,
+          color: "#00B4C8", fontSize: "0.82rem", fontWeight: 700,
           margin: "0 0 2px", fontFamily: FONT_UI,
         }}>
           Bybit Auto-Trade
@@ -659,14 +659,14 @@ function TabEmpty({ icon, title, sub }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  SummaryTab — Oanda or Bybit UTA, selected by isCrypto
+//  SummaryTab — Oanda or Bybit Account, selected by isCrypto
 // ─────────────────────────────────────────────────────────────────────────────
 function SummaryTab({ account, loading, error, onRetry, isCrypto, accent, accentDim, accentBdr }) {
   if (loading) return <TabLoading />;
   if (error)   return <TabError message={error} onRetry={onRetry} />;
   if (!account) return null;
 
-  // ── BYBIT Unified Trading Account ──────────────────────────────────────────
+  // ── Bybit Unified Account ──────────────────────────────────────────
   if (isCrypto) {
     const equity    = parseFloat(account.totalEquity          ?? 0);
     const margin    = parseFloat(account.totalMarginBalance    ?? 0);
@@ -689,7 +689,7 @@ function SummaryTab({ account, loading, error, onRetry, isCrypto, accent, accent
         {/* Account header card */}
         <div style={{
           padding: 16, borderRadius: 16,
-          background: "rgba(255,165,0,0.04)",
+          background: "rgba(0,180,200,0.04)",
           border: `1px solid ${accentBdr}`,
         }}>
           <p style={{
@@ -706,7 +706,7 @@ function SummaryTab({ account, loading, error, onRetry, isCrypto, accent, accent
             color: C.label, fontSize: "0.7rem",
             textTransform: "capitalize", margin: 0, fontFamily: FONT_UI,
           }}>
-            Bybit Unified Trading Account
+            Bybit Unified Account
           </p>
         </div>
 
@@ -1160,7 +1160,7 @@ function normalizeTrade(t, isCrypto, kind) {
     };
   }
 
-  // ── BYBIT — strict null-checks on every field ────────────────────────────
+  // ── Bybit — strict null-checks on every field ────────────────────────────
   const side   = typeof t.side === "string" ? t.side : "";
   const isLong = side === "Buy";
   const sym    = typeof t.symbol === "string"
@@ -1168,7 +1168,7 @@ function normalizeTrade(t, isCrypto, kind) {
     : "—";
 
   if (isHistory) {
-    // Bybit closed PnL record
+    // Bybit closed trade record
     const qty       = Math.abs(parseFloat(t.qty    ?? t.size ?? 0));
     const closedPnl = parseFloat(t.closedPnl ?? t.realizedPnl ?? 0);
     const entryPx   = parseFloat(t.avgEntryPrice ?? t.price ?? 0);
@@ -1184,7 +1184,7 @@ function normalizeTrade(t, isCrypto, kind) {
       pnlLabel:   "Realized P&L",
       entryPx,
       closePx:    exitPx,
-      slPx:       0,    // Bybit closed PnL records don't carry SL/TP
+      slPx:       0,    // Bybit closed trade records don't carry SL/TP
       tpPx:       0,
       riskAmt:    parseFloat(t.closingFee ?? t.commission ?? 0),
       riskLabel:  "Closing Fee",
@@ -1299,7 +1299,7 @@ function TradeDetailCard({ trade: t, kind, isCrypto = false }) {
               color:       C.amber,
               background:  "rgba(255,184,0,0.1)",
               border:      "1px solid rgba(255,184,0,0.28)", fontFamily: FONT_UI,
-            }}>{isCrypto ? "BYBIT" : "SMC/ICT"}</span>
+            }}>{isCrypto ? "Bybit" : "SMC/ICT"}</span>
             <span style={{
               padding: "1px 5px", borderRadius: 4, fontSize: "0.52rem",
               fontWeight: 700, letterSpacing: "0.08em",

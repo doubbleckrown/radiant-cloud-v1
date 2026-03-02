@@ -86,6 +86,7 @@ export default function ProfilePage() {
     auto_trade_enabled, risk_pct,
     oanda_key_hint, oanda_account_id,
     bybit_key_hint, bybit_secret_hint,
+    bybit_auto_trade, bybit_leverage, bybit_margin_type,
     updateSettings, saveOandaCredentials, saveBybitCredentials,
   } = useAuthStore();
   const { isCrypto, accent, accentDim, accentBdr } = useTheme();
@@ -106,6 +107,9 @@ export default function ProfilePage() {
     oanda_account_id:  oanda_account_id    ?? "",
     bybit_key_hint:    bybit_key_hint      ?? "",
     bybit_secret_hint: bybit_secret_hint   ?? "",
+    bybit_auto_trade:  bybit_auto_trade    ?? false,
+    bybit_leverage:    bybit_leverage      ?? 20,
+    bybit_margin_type: bybit_margin_type   ?? "ISOLATED",
   };
 
   // ── Editing state ─────────────────────────────────────────────────────────
@@ -298,6 +302,25 @@ export default function ProfilePage() {
                 keyHint={user.oanda_key_hint}
                 accountId={user.oanda_account_id}
                 saveOandaCredentials={saveOandaCredentials}
+              />
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* ── Bybit Trading Settings (CRYPTO mode only) ────────────────────── */}
+        <AnimatePresence>
+          {isCrypto && (
+            <motion.div
+              key="bybit-trading"
+              initial={{ opacity: 0, y: 6 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -6 }}
+              transition={{ duration: 0.22 }}
+            >
+              <BybitTradingSettings
+                marginType={user.bybit_margin_type}
+                leverage={user.bybit_leverage}
+                autoTrade={user.bybit_auto_trade}
               />
             </motion.div>
           )}
@@ -961,6 +984,296 @@ function EditableRow({ icon, label, value, valueSub, isEditing, isSaving, onEdit
 //  RiskSlider — uses var(--accent) for the fill and thumb so it follows mode.
 //  The CSS for the range thumb is injected once via ensureRangeStyles() and
 //  uses var(--accent) which _persistMode() keeps in sync.
+// ═════════════════════════════════════════════════════════════════════════════
+//  BybitTradingSettings — CRYPTO mode only
+//
+//  Renders a card with:
+//    • Margin Type toggle  — ISOLATED (default) | CROSS
+//    • Leverage slider     — 10× … 50×, default 20×
+//    • Auto-Trade status   — read-only summary (toggle lives on SignalsPage)
+//
+//  All changes POST to PATCH /api/bybit/settings immediately on interaction
+//  (no "Save" button needed — each control saves itself).
+// ═════════════════════════════════════════════════════════════════════════════
+function BybitTradingSettings({ marginType: initMarginType, leverage: initLeverage, autoTrade }) {
+  const { accent, accentDim, accentBdr } = useTheme();
+  const BYBIT_ORANGE = "#FFA500";
+  const clr          = BYBIT_ORANGE;
+
+  const [marginType, setMarginType] = useState(initMarginType ?? "ISOLATED");
+  const [leverage,   setLeverage]   = useState(initLeverage   ?? 20);
+  const [saving,     setSaving]     = useState(false);
+  const [saveMsg,    setSaveMsg]    = useState(null); // null | "ok" | "err"
+
+  // Persist changes to backend
+  const persist = async (patch) => {
+    setSaving(true);
+    setSaveMsg(null);
+    try {
+      await import("../services/api").then(({ default: api }) =>
+        api.patch("/bybit/settings", patch)
+      );
+      setSaveMsg("ok");
+      setTimeout(() => setSaveMsg(null), 2200);
+    } catch {
+      setSaveMsg("err");
+      setTimeout(() => setSaveMsg(null), 3000);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleMarginToggle = async (next) => {
+    setMarginType(next);
+    await persist({ bybit_margin_type: next });
+  };
+
+  const handleLeverageCommit = async () => {
+    await persist({ bybit_leverage: leverage });
+  };
+
+  // Leverage label
+  const levColor = leverage <= 10 ? "#aaaaaa"
+                 : leverage <= 20 ? BYBIT_ORANGE
+                 : leverage <= 35 ? "#ff8c00"
+                 : C.red;
+  const levLabel = leverage <= 5  ? "Conservative"
+                 : leverage <= 15 ? "Standard"
+                 : leverage <= 25 ? "Aggressive"
+                 : leverage <= 40 ? "High Risk"
+                 :                  "Maximum Risk";
+
+  return (
+    <div>
+      <p style={{
+        color: C.sub, fontSize: "0.6rem", fontWeight: 600,
+        letterSpacing: "0.12em", textTransform: "uppercase",
+        margin: "0 0 8px 4px", fontFamily: FONT_UI,
+      }}>
+        Bybit Trading Settings
+      </p>
+
+      <motion.div
+        animate={{
+          border:    `1px solid rgba(255,165,0,0.25)`,
+          boxShadow: "0 0 24px rgba(255,165,0,0.07)",
+        }}
+        transition={{ duration: 0.4 }}
+        style={{ borderRadius: 16, overflow: "hidden", background: C.card }}
+      >
+        {/* ── Header ──────────────────────────────────────────────────── */}
+        <div style={{
+          display: "flex", alignItems: "center", gap: 12,
+          padding: "14px 16px",
+          borderBottom: `1px solid ${C.cardBdr}`,
+        }}>
+          <div style={{
+            width: 40, height: 40, borderRadius: 12, flexShrink: 0,
+            display: "flex", alignItems: "center", justifyContent: "center",
+            fontSize: "1.2rem",
+            background: "rgba(255,165,0,0.1)",
+            border:     "1px solid rgba(255,165,0,0.3)",
+          }}>⚙️</div>
+          <div style={{ flex: 1 }}>
+            <p style={{ color: C.white, fontSize: "0.88rem", fontWeight: 600, margin: "0 0 2px" }}>
+              Futures Execution
+            </p>
+            <p style={{ color: C.sub, fontSize: "0.67rem", margin: 0 }}>
+              Applied to all Bybit auto-trade orders
+            </p>
+          </div>
+          {/* Save feedback badge */}
+          <AnimatePresence>
+            {saveMsg && (
+              <motion.span
+                initial={{ opacity: 0, scale: 0.8 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.8 }}
+                style={{
+                  fontSize: "0.6rem", fontWeight: 700, padding: "3px 9px",
+                  borderRadius: 6, letterSpacing: "0.08em", fontFamily: FONT_MONO,
+                  background: saveMsg === "ok" ? "rgba(0,255,65,0.1)" : "rgba(255,58,58,0.1)",
+                  border:     saveMsg === "ok" ? "1px solid rgba(0,255,65,0.3)" : "1px solid rgba(255,58,58,0.3)",
+                  color:      saveMsg === "ok" ? "#00FF41" : C.red,
+                }}
+              >
+                {saveMsg === "ok" ? "✓ SAVED" : "✕ ERROR"}
+              </motion.span>
+            )}
+          </AnimatePresence>
+        </div>
+
+        {/* ── Margin Type Toggle ──────────────────────────────────────── */}
+        <div style={{ padding: "14px 16px", borderBottom: `1px solid ${C.cardBdr}` }}>
+          <p style={{
+            color: C.label, fontSize: "0.62rem", textTransform: "uppercase",
+            letterSpacing: "0.1em", margin: "0 0 10px", fontFamily: FONT_UI,
+          }}>
+            Margin Mode
+          </p>
+          <div style={{
+            display:      "flex",
+            background:   "#0a0a0a",
+            border:       "1px solid rgba(255,165,0,0.2)",
+            borderRadius: 10,
+            padding:      2,
+            gap:          2,
+          }}>
+            {["ISOLATED", "CROSS"].map(mode => {
+              const isActive = marginType === mode;
+              return (
+                <button
+                  key={mode}
+                  onClick={() => !isActive && handleMarginToggle(mode)}
+                  disabled={saving}
+                  style={{
+                    flex:        1,
+                    padding:     "9px 0",
+                    borderRadius: 8,
+                    border:       "none",
+                    cursor:       isActive ? "default" : "pointer",
+                    background:   isActive ? "rgba(255,165,0,0.18)" : "transparent",
+                    boxShadow:    isActive ? "0 0 12px rgba(255,165,0,0.2)" : "none",
+                    transition:   "all 0.2s",
+                    WebkitTapHighlightColor: "transparent",
+                  }}
+                >
+                  <p style={{
+                    color:         isActive ? BYBIT_ORANGE : C.sub,
+                    fontSize:      "0.72rem",
+                    fontWeight:    isActive ? 700 : 400,
+                    letterSpacing: "0.07em",
+                    fontFamily:    FONT_MONO,
+                    margin:        0,
+                    transition:    "color 0.2s",
+                  }}>
+                    {mode}
+                  </p>
+                  <p style={{
+                    color:    isActive ? `${BYBIT_ORANGE}90` : "#333",
+                    fontSize: "0.55rem",
+                    margin:   "2px 0 0",
+                    fontFamily: FONT_UI,
+                  }}>
+                    {mode === "ISOLATED" ? "Risk capped per trade" : "Shared account balance"}
+                  </p>
+                </button>
+              );
+            })}
+          </div>
+          {marginType === "CROSS" && (
+            <motion.p
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: "auto" }}
+              style={{
+                color: C.amber, fontSize: "0.65rem", margin: "8px 0 0",
+                padding: "6px 10px", borderRadius: 7,
+                background: "rgba(255,184,0,0.06)",
+                border: "1px solid rgba(255,184,0,0.2)",
+              }}
+            >
+              ⚠ Cross margin uses your full account balance as collateral. A losing position can liquidate all funds.
+            </motion.p>
+          )}
+        </div>
+
+        {/* ── Leverage Slider ─────────────────────────────────────────── */}
+        <div style={{ padding: "14px 16px", borderBottom: `1px solid ${C.cardBdr}` }}>
+          <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 10 }}>
+            <p style={{
+              color: C.label, fontSize: "0.62rem", textTransform: "uppercase",
+              letterSpacing: "0.1em", margin: 0, fontFamily: FONT_UI,
+            }}>
+              Leverage
+            </p>
+            <div style={{ display: "flex", alignItems: "baseline", gap: 7 }}>
+              <span style={{
+                color: levColor, fontSize: "1.5rem", fontWeight: 800,
+                fontFamily: FONT_MONO, textShadow: `0 0 12px ${levColor}55`,
+                transition: "color 0.2s",
+              }}>
+                {leverage}×
+              </span>
+              <span style={{
+                fontSize: "0.58rem", fontWeight: 600, padding: "2px 7px", borderRadius: 5,
+                background: `${levColor}12`, border: `1px solid ${levColor}30`,
+                color: levColor, fontFamily: FONT_UI, letterSpacing: "0.06em",
+              }}>
+                {levLabel}
+              </span>
+            </div>
+          </div>
+
+          {/* Slider track + fill */}
+          <div style={{ position: "relative", marginBottom: 6 }}>
+            <div style={{
+              position: "absolute", top: "50%", left: 0, height: 6,
+              borderRadius: 3, pointerEvents: "none",
+              width: `${((leverage - 10) / 40) * 100}%`,
+              transform: "translateY(-50%)",
+              background: `linear-gradient(90deg, ${BYBIT_ORANGE}80, ${levColor})`,
+              boxShadow: `0 0 8px ${levColor}55`,
+              transition: "width 0.08s, background 0.3s",
+            }} />
+            <input
+              type="range" min="10" max="50" step="1" value={leverage}
+              onChange={e => setLeverage(parseInt(e.target.value))}
+              onMouseUp={handleLeverageCommit}
+              onTouchEnd={handleLeverageCommit}
+              style={{
+                WebkitAppearance: "none", appearance: "none",
+                width: "100%", height: 6, borderRadius: 3,
+                background: "rgba(255,255,255,0.06)", outline: "none",
+                cursor: "pointer", position: "relative", zIndex: 1,
+              }}
+            />
+          </div>
+
+          {/* Tick marks */}
+          <div style={{
+            display: "flex", justifyContent: "space-between",
+            fontSize: "0.55rem", color: C.sub, fontFamily: FONT_MONO, marginTop: 4,
+          }}>
+            {["10×","20×","30×","40×","50×"].map(t => (
+              <span key={t} style={{ color: t === `${leverage}×` ? levColor : C.sub }}>{t}</span>
+            ))}
+          </div>
+
+          {/* Risk info row */}
+          <div style={{
+            marginTop: 10, padding: "8px 10px", borderRadius: 8,
+            background: "rgba(0,0,0,0.35)", border: `1px solid ${C.cardBdr}`,
+            color: C.sub, fontSize: "0.67rem", lineHeight: 1.5,
+          }}>
+            At {leverage}× leverage, a <strong style={{ color: `${levColor}cc` }}>
+              {(100 / leverage).toFixed(1)}%
+            </strong> adverse move triggers liquidation ({marginType} mode).
+            Position size is auto-calculated from your risk % setting.
+          </div>
+        </div>
+
+        {/* ── Auto-Trade Status (read-only summary) ───────────────────── */}
+        <div style={{ padding: "12px 16px", display: "flex", alignItems: "center", gap: 10 }}>
+          <div style={{
+            width: 8, height: 8, borderRadius: "50%", flexShrink: 0,
+            background: autoTrade ? BYBIT_ORANGE : "#444",
+            boxShadow: autoTrade ? `0 0 8px ${BYBIT_ORANGE}` : "none",
+          }} />
+          <p style={{ color: C.sub, fontSize: "0.68rem", margin: 0 }}>
+            Auto-Trade is{" "}
+            <span style={{ color: autoTrade ? BYBIT_ORANGE : C.label, fontWeight: 700 }}>
+              {autoTrade ? "ENABLED" : "DISABLED"}
+            </span>
+            {" "}— toggle from the{" "}
+            <span style={{ color: C.label }}>Signals</span> page.
+          </p>
+        </div>
+      </motion.div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // ─────────────────────────────────────────────────────────────────────────────
 function RiskSlider({ value, onChange }) {
   const { accent } = useTheme();

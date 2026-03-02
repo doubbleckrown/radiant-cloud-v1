@@ -1,13 +1,11 @@
 /**
- * useTheme — derive all accent-color tokens from the current appMode.
+ * useTheme — derive all accent-colour tokens from the current appMode.
  *
  * FOREX  → Radiant Green  #00FF41
- * CRYPTO → Bybit Orange   #FFA500
+ * CRYPTO → MEXC Teal      #00B4C8
  *
- * Every page/component that needs dynamic colors calls this hook instead
- * of using hardcoded C.green.  The Oanda-specific C constant objects in
- * each page remain untouched — they are used as fallbacks and for
- * non-accent colors (red, amber, white, label, sub, card, cardBdr, sheet).
+ * Every page/component that needs dynamic colours calls this hook instead
+ * of using hardcoded constants.
  */
 import { useAuthStore } from "../store/authStore";
 
@@ -18,7 +16,7 @@ const FOREX_TOKENS = {
   accentBdr:   "rgba(0,255,65,0.25)",
   accentFaint: "rgba(0,255,65,0.08)",
   accentGlow:  "rgba(0,255,65,0.07)",
-  accentHdr:   "rgba(0,255,65,0.08)",   // header border-bottom
+  accentHdr:   "rgba(0,255,65,0.08)",
   scanline:    "rgba(0,255,65,0.08)",
   modeName:    "FOREX",
   modeLabel:   "Oanda FX",
@@ -26,15 +24,15 @@ const FOREX_TOKENS = {
 };
 
 const CRYPTO_TOKENS = {
-  accent:      "#FFA500",
-  accentDim:   "rgba(255,165,0,0.12)",
-  accentBdr:   "rgba(255,165,0,0.25)",
-  accentFaint: "rgba(255,165,0,0.08)",
-  accentGlow:  "rgba(255,165,0,0.07)",
-  accentHdr:   "rgba(255,165,0,0.08)",
-  scanline:    "rgba(255,165,0,0.06)",
+  accent:      "#00B4C8",
+  accentDim:   "rgba(0,180,200,0.12)",
+  accentBdr:   "rgba(0,180,200,0.25)",
+  accentFaint: "rgba(0,180,200,0.08)",
+  accentGlow:  "rgba(0,180,200,0.07)",
+  accentHdr:   "rgba(0,180,200,0.08)",
+  scanline:    "rgba(0,180,200,0.06)",
   modeName:    "CRYPTO",
-  modeLabel:   "Bybit",
+  modeLabel:   "MEXC",
   modeIcon:    "₿",
 };
 

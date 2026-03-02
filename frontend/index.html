@@ -14,19 +14,16 @@
     already uses the persisted appMode.  This eliminates the "flash of green"
     on page refresh when the user is in CRYPTO mode.
 
-    What it does:
-      1. Reads fx-radiant-app-mode from localStorage (safe, try/catch)
-      2. Sets --accent and --accent-hdr CSS custom properties on :root
-      3. Sets data-mode on <html> so CSS selectors can target it
-      4. Updates the theme-color <meta> for mobile browser chrome
+    FOREX  → #00FF41  (Radiant Green)
+    CRYPTO → #00B4C8  (MEXC Teal)
   -->
   <script>
     (function () {
       try {
         var m = localStorage.getItem('fx-radiant-app-mode');
-        var isCrypto = m === 'CRYPTO';
-        var accent    = isCrypto ? '#FFA500' : '#00FF41';
-        var accentHdr = isCrypto ? 'rgba(255,165,0,0.08)' : 'rgba(0,255,65,0.08)';
+        var isCrypto  = m === 'CRYPTO';
+        var accent    = isCrypto ? '#00B4C8'              : '#00FF41';
+        var accentHdr = isCrypto ? 'rgba(0,180,200,0.08)' : 'rgba(0,255,65,0.08)';
         var r = document.documentElement;
         r.style.setProperty('--accent',     accent);
         r.style.setProperty('--accent-hdr', accentHdr);

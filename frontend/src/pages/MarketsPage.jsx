@@ -2,15 +2,15 @@
  * MarketsPage — Dual-Engine
  * ══════════════════════════════════════════════════════════════
  * FOREX mode  → Oanda instruments via WebSocket ticks + SMC analysis polling
- * CRYPTO mode → Bybit perpetuals via REST polling (/api/bybit/market)
+ * CRYPTO mode → MEXC perpetuals via REST polling (/api/mexc/market)
  *
  * Architecture rules:
  *  • OANDA state (prices, flickerState, analysis) is NEVER modified in CRYPTO
- *  • BYBIT state (cryptoPrices, cryptoFlicker, cryptoAnalysis) is NEVER
+ *  • MEXC state (cryptoPrices, cryptoFlicker, cryptoAnalysis) is NEVER
  *    touched in FOREX mode
- *  • fetchOandaAnalysis() and fetchBybitMarket() are fully separate functions
+ *  • fetchOandaAnalysis() and fetchMexcMarket() are fully separate functions
  *  • All requests pass X-App-Mode header so backend can log/route
- *  • Strict null-checks on every Bybit field to prevent black-screen crashes
+ *  • Strict null-checks on every MEXC field to prevent black-screen crashes
  */
 import { useState, useEffect, useRef, useCallback } from "react";
 import { motion, AnimatePresence }  from "framer-motion";
@@ -55,8 +55,8 @@ const OANDA_META = {
 };
 const OANDA_CATEGORIES = ["All", "Forex", "Metals", "Indices", "Crypto"];
 
-// ── BYBIT instrument metadata — 15 most-traded perpetuals ────────────────────
-const BYBIT_META = {
+// ── MEXC instrument metadata — 15 most-traded perpetuals ────────────────────
+const MEXC_META = {
   BTCUSDT:   { label: "BTC/USDT",  flag: "₿",   category: "L1",       decimals: 1 },
   ETHUSDT:   { label: "ETH/USDT",  flag: "Ξ",   category: "L1",       decimals: 2 },
   SOLUSDT:   { label: "SOL/USDT",  flag: "◎",   category: "L1",       decimals: 2 },
@@ -73,10 +73,10 @@ const BYBIT_META = {
   ATOMUSDT:  { label: "ATOM/USDT", flag: "⚛",   category: "L1",       decimals: 3 },
   NEARUSDT:  { label: "NEAR/USDT", flag: "Ⓝ",   category: "L1",       decimals: 3 },
 };
-const BYBIT_CATEGORIES = ["All", "L1", "L2", "DeFi", "Payments", "Exchange", "Meme"];
+const MEXC_CATEGORIES = ["All", "L1", "L2", "DeFi", "Payments", "Exchange", "Meme"];
 
-// Bybit granularity → interval string (REST kline API)
-const BYBIT_INTERVAL = { M1: "1", M5: "5", M15: "15", H1: "60" };
+// MEXC granularity → interval string (REST kline API)
+const MEXC_INTERVAL = { M1: "1m", M5: "5m", M15: "15m", H1: "1h" };
 
 // ═════════════════════════════════════════════════════════════════════════════
 export default function MarketsPage() {
@@ -87,10 +87,10 @@ export default function MarketsPage() {
   const [flickerState, setFlicker]   = useState({});
   const [analysis,     setAnalysis]  = useState({});
 
-  // ── BYBIT engine state (never mutated in FOREX mode) ──────────────────────
+  // ── MEXC engine state (never mutated in FOREX mode) ──────────────────────
   const [cryptoPrices,   setCryptoPrices]   = useState({});
   const [cryptoFlicker,  setCryptoFlicker]  = useState({});
-  const [cryptoMeta,     setCryptoMeta]     = useState({});  // 24h stats from Bybit
+  const [cryptoMeta,     setCryptoMeta]     = useState({});  // 24h stats from MEXC
 
   const tickerRef      = useRef({});
   const cryptoTickRef  = useRef({});
@@ -156,10 +156,10 @@ export default function MarketsPage() {
     return () => clearInterval(id);
   }, [isCrypto, fetchOandaAnalysis]);
 
-  // ── BYBIT: market data polling — split into its own function ──────────────
-  const fetchBybitMarket = useCallback(async () => {
+  // ── MEXC: market data polling — split into its own function ──────────────
+  const fetchMexcMarket = useCallback(async () => {
     try {
-      const { data } = await api.get("/bybit/market", {
+      const { data } = await api.get("/mexc/market", {
         headers: { "X-App-Mode": "CRYPTO" },
       });
       if (!Array.isArray(data)) return;
@@ -202,14 +202,14 @@ export default function MarketsPage() {
 
   useEffect(() => {
     if (!isCrypto) return;  // ← isolated: never runs in FOREX mode
-    fetchBybitMarket();
-    const id = setInterval(fetchBybitMarket, 30_000);
+    fetchMexcMarket();
+    const id = setInterval(fetchMexcMarket, 30_000);
     return () => clearInterval(id);
-  }, [isCrypto, fetchBybitMarket]);
+  }, [isCrypto, fetchMexcMarket]);
 
   // ── Active state based on mode ────────────────────────────────────────────
-  const activeMeta       = isCrypto ? BYBIT_META       : OANDA_META;
-  const activeCategories = isCrypto ? BYBIT_CATEGORIES : OANDA_CATEGORIES;
+  const activeMeta       = isCrypto ? MEXC_META       : OANDA_META;
+  const activeCategories = isCrypto ? MEXC_CATEGORIES : OANDA_CATEGORIES;
   const activePrices     = isCrypto ? cryptoPrices      : prices;
   const activeFlicker    = isCrypto ? cryptoFlicker     : flickerState;
   const activeAnalysis   = isCrypto ? cryptoMeta        : analysis;
@@ -246,7 +246,7 @@ export default function MarketsPage() {
               {isCrypto ? "Crypto" : "Markets"}
             </h1>
             <p style={{ color: C.label, fontSize: "0.7rem", margin: "2px 0 0" }}>
-              {liveCount} live · {isCrypto ? "Bybit Linear" : "Oanda v20"}
+              {liveCount} live · {isCrypto ? "MEXC Spot" : "Oanda v20"}
             </p>
           </div>
           <div style={{
@@ -456,9 +456,9 @@ const TIMEFRAMES = [
 const CHART_H = 280;
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  InlineChart — candlestick chart for BOTH Oanda & Bybit
+//  InlineChart — candlestick chart for BOTH Oanda & MEXC
 //  • isCrypto=false → /markets/{instrument}/candles (Oanda)
-//  • isCrypto=true  → /bybit/candles/{symbol}?interval={bybitInterval}
+//  • isCrypto=true  → /mexc/candles/{symbol}?interval={mexcInterval}
 // ─────────────────────────────────────────────────────────────────────────────
 function InlineChart({ instrument, decimals, isCrypto, accent, accentDim, accentBdr }) {
   const containerRef          = useRef(null);
@@ -514,9 +514,9 @@ function InlineChart({ instrument, decimals, isCrypto, accent, accentDim, accent
       },
     });
 
-    // Build endpoint: Oanda or Bybit
+    // Build endpoint: Oanda or MEXC
     const endpoint = isCrypto
-      ? `/bybit/candles/${instrument}?interval=${BYBIT_INTERVAL[gran] ?? "60"}&limit=${count}`
+      ? `/mexc/candles/${instrument}?interval=${MEXC_INTERVAL[gran] ?? "1h"}&limit=${count}`
       : `/markets/${instrument}/candles?granularity=${gran}&count=${count}`;
 
     const headers = { "X-App-Mode": isCrypto ? "CRYPTO" : "FOREX" };
@@ -623,7 +623,7 @@ function InlineStats({ analysis, isCrypto, accent }) {
   if (!analysis || Object.keys(analysis).length === 0) return null;
 
   if (isCrypto) {
-    // Bybit 24h stats
+    // MEXC 24h stats
     const h24  = typeof analysis.high24h   === "number" ? analysis.high24h  : null;
     const l24  = typeof analysis.low24h    === "number" ? analysis.low24h   : null;
     const vol  = typeof analysis.volume24h === "number" ? analysis.volume24h : null;

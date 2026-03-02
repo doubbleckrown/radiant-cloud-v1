@@ -1,133 +1,155 @@
 /**
- * SignalsPage — Dual-Engine
- * ══════════════════════════════════════════════════════════════
- * FOREX mode  → Oanda SMC signals via WebSocket + REST /signals
- * CRYPTO mode → Bybit SMC signals via REST polling /bybit/signals
+ * SignalsPage — Mode-Aware Signal Feed
+ * ══════════════════════════════════════════════════════════════════════════════
+ * FOREX mode  → Oanda SMC signals from GET /api/signals
+ * CRYPTO mode → Bybit SMC signals from GET /api/bybit/signals
+ *               + BybitAutoTrade toggle at the top of the page
  *
- * Architecture rules:
- *  • `signals`       (FOREX) is NEVER modified in CRYPTO mode
- *  • `cryptoSignals` (BYBIT) is NEVER modified in FOREX mode
- *  • fetchBybitSignals() and the Oanda WebSocket handler are fully isolated
- *  • All BYBIT requests pass X-App-Mode: CRYPTO header
- *  • Push notifications auto-subscribe on mount (no button needed)
- *  • 95%+ confidence signals trigger local notification + haptic feedback
- *    in BOTH modes
+ * Signal deduplication:
+ *   The backend's TradeTracker ensures only the FIRST signal per instrument
+ *   appears until the trade is closed or the 2-hour TTL expires.
+ *   The frontend additionally de-dupes by (instrument + direction + timestamp
+ *   rounded to 5-minute bucket) so rapid re-fetches don't show duplicates.
  *
- * Font: Inter (UI)  ·  JetBrains Mono (price/numeric values)
+ * OneSignal push notifications are initialised automatically on login (in
+ * App.jsx) — no toggle shown here.
  */
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { motion, AnimatePresence }                   from "framer-motion";
-import { useWebSocket }                              from "../hooks/useWebSocket";
-import { usePushNotifications }                      from "../hooks/usePushNotifications";
-import { showLocalNotification }                     from "../services/pushNotifications";
+import { useAuthStore }                              from "../store/authStore";
 import { useTheme }                                  from "../hooks/useTheme";
-import api                                           from "../utils/api";
+import api                                           from "../services/api";
 
-// ── Non-accent design tokens (same across both modes) ─────────────────────────
+// ── Colour tokens ─────────────────────────────────────────────────────────────
 const C = {
-  green:    "#00FF41",
-  greenDim: "rgba(0,255,65,0.12)",
-  greenBdr: "rgba(0,255,65,0.25)",
-  red:      "#FF3A3A",
-  amber:    "#FFB800",
-  white:    "#ffffff",
-  label:    "#aaaaaa",
-  sub:      "#666666",
-  card:     "#0f0f0f",
-  cardBdr:  "rgba(255,255,255,0.07)",
-  sheet:    "#141414",
+  white:   "#ffffff",
+  label:   "#aaaaaa",
+  sub:     "#555555",
+  card:    "#0f0f0f",
+  cardBdr: "rgba(255,255,255,0.07)",
+  green:   "#00FF41",
+  red:     "#FF3B3B",
+  amber:   "#FFB800",
 };
 const FONT_UI   = "'Inter', sans-serif";
 const FONT_MONO = "'JetBrains Mono', monospace";
 
-// Confidence threshold for push notifications (both modes)
-const PUSH_THRESHOLD = 95;
+// Interval between signal polls in milliseconds
+const POLL_INTERVAL = 15_000;
 
-// ── Normalize Bybit signal → shared schema ─────────────────────────────────────
-// Bybit signals may use `symbol` instead of `instrument`; this maps to a common
-// shape so the signal card component renders identically in both modes.
-function normalizeSig(s) {
-  if (!s || typeof s !== "object") return null;
-  return {
-    ...s,
-    // instrument: always present, normalized to display form "BTC/USDT"
-    instrument: typeof s.instrument === "string"
-      ? s.instrument
-      : typeof s.symbol === "string"
-      ? s.symbol.replace(/USDT$/, "/USDT").replace(/USDC$/, "/USDC")
-      : "—",
-  };
+// ─────────────────────────────────────────────────────────────────────────────
+//  Helpers
+// ─────────────────────────────────────────────────────────────────────────────
+function fmtPrice(n, decimals = 5) {
+  if (n == null || isNaN(n)) return "—";
+  return Number(n).toFixed(decimals);
+}
+function fmtTime(ts) {
+  if (!ts) return "—";
+  const d = new Date(ts * 1000);
+  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+function fmtDate(ts) {
+  if (!ts) return "";
+  return new Date(ts * 1000).toLocaleDateString([], { month: "short", day: "numeric" });
+}
+/** Bucket timestamp to 5-minute window for dedup key */
+function dedupeKey(sig) {
+  const bucket = Math.floor((sig.timestamp || 0) / 300);
+  return `${sig.instrument ?? sig.symbol}|${sig.direction}|${bucket}`;
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
+// ─────────────────────────────────────────────────────────────────────────────
+//  Main component
+// ─────────────────────────────────────────────────────────────────────────────
 export default function SignalsPage() {
   const { isCrypto, accent, accentDim, accentBdr } = useTheme();
+  const {
+    bybit_auto_trade,
+    bybit_leverage,
+    bybit_margin_type,
+  } = useAuthStore();
 
-  // ── OANDA engine state (never mutated in CRYPTO mode) ─────────────────────
-  const [signals,       setSignals]       = useState([]);
+  const [signals,      setSignals]      = useState([]);
+  const [tradeLocks,   setTradeLocks]   = useState({});
+  const [loading,      setLoading]      = useState(true);
+  const [error,        setError]        = useState(null);
+  const [autoTradeOn,  setAutoTradeOn]  = useState(bybit_auto_trade ?? false);
+  const [togglingAT,   setTogglingAT]   = useState(false);
+  const seenKeys = useRef(new Set());
 
-  // ── BYBIT engine state (never mutated in FOREX mode) ──────────────────────
-  const [cryptoSignals, setCryptoSignals] = useState([]);
-
-  const { lastMessage } = useWebSocket();
-  usePushNotifications();   // auto-subscribes on mount — no manual action needed
-
-  // Tracks which signal IDs we've already notified for (prevents duplicates)
-  const notifiedRef = useRef(new Set());
-
-  // ── OANDA: load historic signals on mount ─────────────────────────────────
-  useEffect(() => {
-    api.get("/signals", { headers: { "X-App-Mode": "FOREX" } })
-      .then(({ data }) => setSignals(Array.isArray(data) ? data : []))
-      .catch(() => {});
-  }, []); // eslint-disable-line
-
-  // ── OANDA: handle live WebSocket messages (FOREX only) ────────────────────
-  useEffect(() => {
-    if (isCrypto || !lastMessage) return;  // ← isolated: never runs in CRYPTO mode
-
-    if (lastMessage.type === "SIGNAL") {
-      const sig = normalizeSig(lastMessage) ?? lastMessage;
-      setSignals(prev => [sig, ...prev].slice(0, 100));
-      fireNotification(sig, notifiedRef);
-    }
-  }, [lastMessage, isCrypto]);
-
-  // ── BYBIT: poll /bybit/signals (CRYPTO only) ──────────────────────────────
-  const fetchBybitSignals = useCallback(async () => {
+  // ── Fetch signals ─────────────────────────────────────────────────────────
+  const fetchSignals = useCallback(async () => {
     try {
-      const { data } = await api.get("/bybit/signals", {
-        headers: { "X-App-Mode": "CRYPTO" },
-      });
-      if (!Array.isArray(data)) return;
-      const normalized = data.map(normalizeSig).filter(Boolean);
-      setCryptoSignals(normalized.slice(0, 100));
-
-      // Notify on any new high-confidence signal that just arrived
-      normalized.forEach(sig => {
-        if ((sig.confidence ?? 0) >= PUSH_THRESHOLD) {
-          fireNotification(sig, notifiedRef);
+      const endpoint = isCrypto ? "/bybit/signals" : "/signals";
+      const { data } = await api.get(endpoint);
+      // De-dupe: keep only first signal per instrument bucket
+      const deduped = [];
+      const seen    = new Set();
+      for (const sig of (data ?? [])) {
+        const key = dedupeKey(sig);
+        if (!seen.has(key)) {
+          seen.add(key);
+          deduped.push(sig);
         }
-      });
-    } catch {
-      // Non-fatal — keep showing stale signals
+      }
+      setSignals(deduped);
+      setError(null);
+    } catch (e) {
+      setError(e?.userMessage ?? "Could not load signals");
+    } finally {
+      setLoading(false);
     }
-  }, []);
+  }, [isCrypto]);
 
+  // ── Fetch trade locks (Bybit only) ────────────────────────────────────────
+  const fetchTradeLocks = useCallback(async () => {
+    if (!isCrypto) { setTradeLocks({}); return; }
+    try {
+      const { data } = await api.get("/bybit/trade-locks");
+      setTradeLocks(data ?? {});
+    } catch { /* non-critical */ }
+  }, [isCrypto]);
+
+  // ── Poll on mount + interval ──────────────────────────────────────────────
   useEffect(() => {
-    if (!isCrypto) return;  // ← isolated: never runs in FOREX mode
-    fetchBybitSignals();
-    const id = setInterval(fetchBybitSignals, 30_000);
+    setLoading(true);
+    setSignals([]);
+    seenKeys.current.clear();
+    fetchSignals();
+    fetchTradeLocks();
+    const id = setInterval(() => { fetchSignals(); fetchTradeLocks(); }, POLL_INTERVAL);
     return () => clearInterval(id);
-  }, [isCrypto, fetchBybitSignals]);
+  }, [fetchSignals, fetchTradeLocks]);
 
-  // ── Active signal feed ─────────────────────────────────────────────────────
-  const activeSignals = isCrypto ? cryptoSignals : signals;
+  // Sync toggle state when authStore hydrates
+  useEffect(() => {
+    setAutoTradeOn(bybit_auto_trade ?? false);
+  }, [bybit_auto_trade]);
+
+  // ── Toggle Bybit AutoTrade ────────────────────────────────────────────────
+  const handleAutoTradeToggle = useCallback(async () => {
+    const next = !autoTradeOn;
+    setAutoTradeOn(next);
+    setTogglingAT(true);
+    try {
+      await api.patch("/bybit/settings", { bybit_auto_trade: next });
+      // Optimistically sync into authStore (no full refresh needed)
+      const store = useAuthStore.getState();
+      if (typeof store.setBybitSettings === "function") {
+        store.setBybitSettings({ bybit_auto_trade: next });
+      }
+    } catch (e) {
+      setAutoTradeOn(!next); // revert on failure
+    } finally {
+      setTogglingAT(false);
+    }
+  }, [autoTradeOn]);
 
   return (
     <div style={{ fontFamily: FONT_UI, color: C.white, minHeight: "100%" }}>
 
-      {/* ── Sticky header ─────────────────────────────────────────────────── */}
+      {/* ── Sticky header ────────────────────────────────────────────────── */}
       <div style={{
         position:             "sticky",
         top:                  0,
@@ -137,312 +159,475 @@ export default function SignalsPage() {
         backdropFilter:       "blur(20px)",
         WebkitBackdropFilter: "blur(20px)",
         borderBottom:         `1px solid ${accent}14`,
+        transition:           "border-color 0.4s ease",
       }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
           <div>
             <h1 style={{
               color: C.white, fontSize: "1.2rem", fontWeight: 700,
-              letterSpacing: "0.03em", margin: 0, fontFamily: FONT_UI,
+              letterSpacing: "0.03em", margin: "0 0 2px",
             }}>
-              {isCrypto ? "Crypto Signals" : "Signals"}
+              Signals
             </h1>
-            <p style={{ color: C.label, fontSize: "0.7rem", margin: "2px 0 0", fontFamily: FONT_UI }}>
-              {isCrypto
-                ? "100% confluence · Bybit SMC/ICT"
-                : "100% confluence · SMC/ICT confirmed"}
+            <p style={{ color: C.sub, fontSize: "0.65rem", margin: 0, fontFamily: FONT_MONO }}>
+              {isCrypto ? "Bybit Linear · SMC 1:3 RR" : "Oanda v20 · SMC 1:2 RR"} · auto-refresh 15s
             </p>
           </div>
-          {activeSignals.length > 0 && (
-            <div style={{
-              padding:       "4px 10px",
-              borderRadius:  99,
-              background:    accentDim,
-              border:        `1px solid ${accentBdr}`,
-              color:         accent,
-              fontSize:      "0.65rem",
-              fontWeight:    700,
-              fontFamily:    FONT_MONO,
-              letterSpacing: "0.08em",
-            }}>
-              {activeSignals.length}
-            </div>
+
+          {/* Signal count badge */}
+          {signals.length > 0 && (
+            <motion.div
+              initial={{ scale: 0.7, opacity: 0 }}
+              animate={{ scale: 1,   opacity: 1 }}
+              style={{
+                padding:       "4px 10px",
+                borderRadius:  99,
+                background:    accentDim,
+                border:        `1px solid ${accentBdr}`,
+                color:         accent,
+                fontSize:      "0.65rem",
+                fontWeight:    700,
+                fontFamily:    FONT_MONO,
+                letterSpacing: "0.06em",
+              }}
+            >
+              {signals.length} ACTIVE
+            </motion.div>
           )}
         </div>
       </div>
 
-      {/* ── Content ───────────────────────────────────────────────────────── */}
-      <div style={{ padding: "12px 16px 32px", display: "flex", flexDirection: "column", gap: 10 }}>
+      <div style={{ padding: "16px 16px 40px", display: "flex", flexDirection: "column", gap: 12 }}>
 
-        {/* ── Empty state ──────────────────────────────────────────────────── */}
-        {activeSignals.length === 0 && (
-          <div style={{
-            display:        "flex",
-            flexDirection:  "column",
-            alignItems:     "center",
-            justifyContent: "center",
-            padding:        "64px 0",
-            gap:            16,
-          }}>
+        {/* ── Bybit AutoTrade Toggle (CRYPTO mode only) ──────────────────── */}
+        <AnimatePresence>
+          {isCrypto && (
             <motion.div
-              animate={{ scale: [1, 1.08, 1], opacity: [0.5, 1, 0.5] }}
-              transition={{ duration: 2.2, repeat: Infinity }}
-              style={{
-                width:          60,
-                height:         60,
-                borderRadius:   "50%",
-                background:     accentDim,
-                border:         `1px solid ${accentBdr}`,
-                display:        "flex",
-                alignItems:     "center",
-                justifyContent: "center",
-                fontSize:       "1.5rem",
-              }}
-            >{isCrypto ? "₿" : "⚡"}</motion.div>
-            <div style={{ textAlign: "center" }}>
-              <p style={{
-                color: C.label, fontSize: "0.82rem", letterSpacing: "0.06em",
-                textTransform: "uppercase", margin: "0 0 4px", fontFamily: FONT_UI,
-              }}>
-                Awaiting confluence
-              </p>
-              <p style={{ color: C.sub, fontSize: "0.7rem", margin: 0, fontFamily: FONT_UI }}>
-                {isCrypto
-                  ? "Signals fire when all 3 Bybit SMC layers align"
-                  : "Signals fire when all 3 SMC layers align"}
-              </p>
-            </div>
+              key="bybit-autotrade"
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: "auto" }}
+              exit={{ opacity: 0, height: 0 }}
+              transition={{ duration: 0.25 }}
+              style={{ overflow: "hidden" }}
+            >
+              <BybitAutoTradeCard
+                enabled={autoTradeOn}
+                toggling={togglingAT}
+                leverage={bybit_leverage ?? 20}
+                marginType={bybit_margin_type ?? "ISOLATED"}
+                onToggle={handleAutoTradeToggle}
+                accent={accent}
+                accentDim={accentDim}
+                accentBdr={accentBdr}
+              />
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* ── Loading skeleton ────────────────────────────────────────────── */}
+        {loading && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            {[1, 2, 3].map(i => (
+              <div key={i} style={{
+                height: 120, borderRadius: 16,
+                background: "rgba(255,255,255,0.03)",
+                border: `1px solid ${C.cardBdr}`,
+                animation: "pulse 1.8s ease-in-out infinite",
+              }} />
+            ))}
           </div>
         )}
 
-        {/* ── Signal cards ─────────────────────────────────────────────────── */}
-        <AnimatePresence>
-          {activeSignals.map((sig, i) => (
-            <SignalCard key={`${sig.instrument}-${sig.timestamp}-${i}`} sig={sig} accent={accent} />
-          ))}
+        {/* ── Error state ─────────────────────────────────────────────────── */}
+        {!loading && error && (
+          <div style={{
+            padding: "16px", borderRadius: 14,
+            background: "rgba(255,59,59,0.07)", border: "1px solid rgba(255,59,59,0.22)",
+            color: C.red, fontSize: "0.8rem", textAlign: "center",
+          }}>
+            ⚠ {error}
+            <button
+              onClick={fetchSignals}
+              style={{
+                display: "block", margin: "10px auto 0", padding: "6px 14px",
+                borderRadius: 8, background: "rgba(255,59,59,0.1)",
+                border: "1px solid rgba(255,59,59,0.3)",
+                color: C.red, fontSize: "0.72rem", cursor: "pointer",
+              }}
+            >Retry</button>
+          </div>
+        )}
+
+        {/* ── Empty state ─────────────────────────────────────────────────── */}
+        {!loading && !error && signals.length === 0 && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            style={{ textAlign: "center", paddingTop: 48 }}
+          >
+            <div style={{ fontSize: "2.4rem", marginBottom: 12 }}>
+              {isCrypto ? "₿" : "📡"}
+            </div>
+            <p style={{ color: C.label, fontSize: "0.88rem", fontWeight: 600, margin: "0 0 6px" }}>
+              Scanning for setups…
+            </p>
+            <p style={{ color: C.sub, fontSize: "0.72rem", margin: 0 }}>
+              The SMC engine requires all 3 layers to confirm before firing a signal.
+            </p>
+          </motion.div>
+        )}
+
+        {/* ── Signal cards ────────────────────────────────────────────────── */}
+        <AnimatePresence initial={false}>
+          {signals.map((sig, idx) => {
+            const sym    = sig.instrument ?? sig.symbol ?? "";
+            const locked = isCrypto && Boolean(tradeLocks[sym]);
+            return (
+              <motion.div
+                key={`${sym}${sig.direction}${sig.timestamp}`}
+                initial={{ opacity: 0, y: 16 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, scale: 0.95 }}
+                transition={{ duration: 0.25, delay: idx * 0.04 }}
+              >
+                <SignalCard
+                  sig={sig}
+                  locked={locked}
+                  isCrypto={isCrypto}
+                  accent={accent}
+                  accentDim={accentDim}
+                  accentBdr={accentBdr}
+                />
+              </motion.div>
+            );
+          })}
         </AnimatePresence>
       </div>
+
+      {/* Pulse keyframe */}
+      <style>{`@keyframes pulse{0%,100%{opacity:.5}50%{opacity:1}}`}</style>
     </div>
   );
 }
 
-
 // ─────────────────────────────────────────────────────────────────────────────
-//  SignalCard — renders one signal in both FOREX and CRYPTO mode.
-//  Both modes share this identical card since normalizeSig() maps Bybit
-//  symbols to the same `sig.instrument` field.  The SMC layer breakdown
-//  panel is shown only when layer data is present (may be absent on Bybit).
+//  BybitAutoTradeCard
+//  Prominent toggle shown at top of Signals page in CRYPTO mode.
+//  When ON: the backend will auto-execute every 100% confidence signal
+//           for this user using their saved Bybit credentials.
 // ─────────────────────────────────────────────────────────────────────────────
-function SignalCard({ sig, accent }) {
-  const isLong     = sig.direction === "LONG";
-  const dirColor   = isLong ? C.green : C.red;
-  const isHighConf = (sig.confidence ?? 0) >= PUSH_THRESHOLD;
-  const ts         = sig.timestamp
-    ? new Date(sig.timestamp * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
-    : "—";
-
-  // Determine price precision from entry magnitude
-  const entry = sig.entry ?? null;
-  const dec   = entry !== null
-    ? (entry > 10000 ? 1 : entry > 100 ? 2 : entry > 1 ? 4 : 5)
-    : 5;
-  const fmtPrice = (n) => (n != null ? Number(n).toFixed(dec) : "—");
-
-  // Only show layer breakdown if backend provided it
-  const hasLayers = sig.layer1 != null || sig.rr != null;
+function BybitAutoTradeCard({ enabled, toggling, leverage, marginType, onToggle, accent, accentDim, accentBdr }) {
+  const BYBIT_ORANGE = "#FFA500";
+  const clr = enabled ? BYBIT_ORANGE : C.sub;
 
   return (
     <motion.div
-      initial={{ opacity: 0, y: -16, scale: 0.97 }}
-      animate={{ opacity: 1, y: 0, scale: 1 }}
-      exit={{ opacity: 0, height: 0 }}
-      transition={{ duration: 0.3, ease: [0.32, 0.72, 0, 1] }}
-      style={{
-        borderRadius: 16,
-        overflow:     "hidden",
-        background:   C.card,
-        border:       `1px solid ${isLong ? "rgba(0,255,65,0.22)" : "rgba(255,58,58,0.22)"}`,
-        boxShadow:    isLong
-          ? "0 0 16px rgba(0,255,65,0.06)"
-          : "0 0 16px rgba(255,58,58,0.06)",
+      animate={{
+        background: enabled ? "rgba(255,165,0,0.06)" : C.card,
+        border:     `1px solid ${enabled ? "rgba(255,165,0,0.28)" : C.cardBdr}`,
+        boxShadow:  enabled ? "0 0 28px rgba(255,165,0,0.12)" : "none",
       }}
+      transition={{ duration: 0.35 }}
+      style={{ borderRadius: 18, overflow: "hidden" }}
     >
-      {/* Direction accent bar */}
-      <div style={{
-        height:     2,
-        background: isLong
-          ? "linear-gradient(90deg, transparent, #00FF41, transparent)"
-          : "linear-gradient(90deg, transparent, #FF3A3A, transparent)",
-      }} />
+      {/* Main toggle row */}
+      <div style={{ display: "flex", alignItems: "center", gap: 14, padding: "16px 16px" }}>
+        {/* Icon */}
+        <motion.div
+          animate={{
+            background: enabled ? "rgba(255,165,0,0.15)" : "rgba(255,255,255,0.04)",
+            border:     `1px solid ${enabled ? "rgba(255,165,0,0.4)" : C.cardBdr}`,
+            boxShadow:  enabled ? "0 0 16px rgba(255,165,0,0.25)" : "none",
+          }}
+          transition={{ duration: 0.35 }}
+          style={{
+            width: 48, height: 48, borderRadius: 14, flexShrink: 0,
+            display: "flex", alignItems: "center", justifyContent: "center",
+            fontSize: "1.5rem",
+          }}
+        >
+          {enabled ? "⚡" : "🤖"}
+        </motion.div>
 
-      <div style={{ padding: 14 }}>
-        {/* ── Header ──────────────────────────────────────────────────── */}
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+        {/* Text */}
+        <div style={{ flex: 1 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span style={{
-              color: C.white, fontSize: "1rem", fontWeight: 700,
-              letterSpacing: "0.02em", fontFamily: FONT_UI,
-            }}>
-              {sig.instrument ?? "—"}
-            </span>
-
-            {/* Direction badge */}
-            <span style={{
-              padding:       "2px 8px",
-              borderRadius:  6,
-              fontSize:      "0.62rem",
-              fontWeight:    700,
-              letterSpacing: "0.07em",
-              color:         dirColor,
-              background:    isLong ? "rgba(0,255,65,0.12)" : "rgba(255,58,58,0.12)",
-              border:        `1px solid ${isLong ? C.greenBdr : "rgba(255,58,58,0.3)"}`,
-              fontFamily:    FONT_UI,
-            }}>
-              {isLong ? "▲ LONG" : "▼ SHORT"}
-            </span>
-
-            {/* 🚨 High-confidence badge */}
-            {isHighConf && (
+            <p style={{ color: C.white, fontSize: "0.92rem", fontWeight: 700, margin: 0 }}>
+              Bybit Auto-Trade
+            </p>
+            {enabled && (
               <motion.span
-                animate={{ opacity: [1, 0.5, 1] }}
-                transition={{ duration: 1.2, repeat: Infinity }}
+                initial={{ scale: 0 }}
+                animate={{ scale: 1 }}
                 style={{
-                  padding:       "2px 7px",
-                  borderRadius:  6,
-                  fontSize:      "0.58rem",
-                  fontWeight:    700,
-                  letterSpacing: "0.06em",
-                  color:         C.amber,
-                  background:    "rgba(255,184,0,0.1)",
-                  border:        "1px solid rgba(255,184,0,0.3)",
-                  fontFamily:    FONT_UI,
+                  fontSize: "0.55rem", fontWeight: 800, letterSpacing: "0.1em",
+                  padding: "2px 7px", borderRadius: 5,
+                  background: "rgba(255,165,0,0.15)",
+                  border: "1px solid rgba(255,165,0,0.4)",
+                  color: BYBIT_ORANGE, fontFamily: FONT_MONO,
                 }}
-              >
-                🚨 {sig.confidence}%
-              </motion.span>
+              >LIVE</motion.span>
             )}
           </div>
-
-          <span style={{
-            color: C.sub, fontSize: "0.68rem",
-            letterSpacing: "0.04em", fontFamily: FONT_MONO,
-          }}>
-            {ts}
-          </span>
+          <motion.p
+            animate={{ color: clr }}
+            transition={{ duration: 0.3 }}
+            style={{ fontSize: "0.68rem", margin: "3px 0 0", lineHeight: 1.4 }}
+          >
+            {enabled
+              ? `Auto-executing 100% signals · ${leverage}× ${marginType} · 1:3 RR`
+              : "Enable to auto-execute 100% confidence Bybit signals"}
+          </motion.p>
         </div>
 
-        {/* ── Price grid: Entry / SL / TP ─────────────────────────────── */}
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: hasLayers ? 10 : 0 }}>
-          {[
-            { label: "Entry",       value: fmtPrice(sig.entry), color: C.white },
-            { label: "Stop Loss",   value: fmtPrice(sig.sl),    color: C.red   },
-            { label: "Take Profit", value: fmtPrice(sig.tp),    color: C.green },
-          ].map(({ label, value, color }) => (
-            <div key={label} style={{
-              padding:      "8px 6px",
-              borderRadius: 10,
-              textAlign:    "center",
-              background:   C.sheet,
-              border:       `1px solid ${C.cardBdr}`,
-            }}>
-              <p style={{
-                color: C.sub, fontSize: "0.58rem", letterSpacing: "0.1em",
-                margin: "0 0 4px", textTransform: "uppercase", fontFamily: FONT_UI,
-              }}>
-                {label}
-              </p>
-              <p style={{
-                color,
-                fontSize:   "0.72rem",
-                fontWeight: 600,
-                fontFamily: FONT_MONO,
-                margin:     0,
-                textShadow: color !== C.white ? `0 0 6px ${color}55` : "none",
-              }}>
-                {value}
-              </p>
-            </div>
-          ))}
-        </div>
-
-        {/* ── SMC / layer breakdown — only shown when backend provides layer data ── */}
-        {hasLayers && (
-          <div style={{
-            padding:       "10px 12px",
-            borderRadius:  10,
-            background:    "rgba(0,0,0,0.4)",
-            border:        `1px solid ${C.cardBdr}`,
-            fontFamily:    FONT_MONO,
-            fontSize:      "0.7rem",
-            display:       "flex",
-            flexDirection: "column",
-            gap:           5,
-          }}>
-            {sig.layer1 != null && (
-              <div style={{ display: "flex", justifyContent: "space-between" }}>
-                <span style={{ color: C.sub }}>L1 Trend</span>
-                <span style={{
-                  color: sig.layer1 === "BULLISH" ? C.green : sig.layer1 === "BEARISH" ? C.red : C.label,
-                }}>
-                  {sig.layer1}
-                </span>
-              </div>
-            )}
-            {sig.layer2 != null && (
-              <div style={{ display: "flex", justifyContent: "space-between" }}>
-                <span style={{ color: C.sub }}>L2 Zone</span>
-                <span style={{ color: C.label }}>{sig.layer2}</span>
-              </div>
-            )}
-            <div style={{ display: "flex", justifyContent: "space-between" }}>
-              <span style={{ color: C.sub }}>L3 MSS</span>
-              <span style={{ color: C.green }}>CONFIRMED ✓</span>
-            </div>
-            {sig.rr != null && (
-              <div style={{ display: "flex", justifyContent: "space-between" }}>
-                <span style={{ color: C.sub }}>R:R</span>
-                <span style={{ color: C.amber }}>1 : {sig.rr}</span>
-              </div>
-            )}
-            {sig.breakeven != null && (
-              <div style={{ display: "flex", justifyContent: "space-between" }}>
-                <span style={{ color: C.sub }}>Breakeven</span>
-                <span style={{ color: C.label }}>{fmtPrice(sig.breakeven)}</span>
-              </div>
-            )}
-          </div>
-        )}
+        {/* Toggle switch */}
+        <button
+          onClick={onToggle}
+          disabled={toggling}
+          aria-label={enabled ? "Disable Bybit Auto-Trade" : "Enable Bybit Auto-Trade"}
+          style={{
+            width: 52, height: 30, borderRadius: 15,
+            background:    enabled ? "rgba(255,165,0,0.25)" : "rgba(255,255,255,0.07)",
+            border:        `1.5px solid ${enabled ? "rgba(255,165,0,0.5)" : C.cardBdr}`,
+            cursor:        toggling ? "not-allowed" : "pointer",
+            position:      "relative",
+            flexShrink:    0,
+            transition:    "background 0.3s, border-color 0.3s",
+            WebkitTapHighlightColor: "transparent",
+          }}
+        >
+          <motion.div
+            animate={{ x: enabled ? 22 : 2 }}
+            transition={{ type: "spring", stiffness: 600, damping: 38 }}
+            style={{
+              position:  "absolute",
+              top:       3, width: 22, height: 22, borderRadius: "50%",
+              background: enabled ? BYBIT_ORANGE : "#444",
+              boxShadow:  enabled ? `0 0 10px ${BYBIT_ORANGE}60` : "none",
+            }}
+          />
+        </button>
       </div>
+
+      {/* Warning banner when enabled */}
+      <AnimatePresence>
+        {enabled && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            style={{ overflow: "hidden" }}
+          >
+            <div style={{
+              margin: "0 16px 14px",
+              padding: "10px 14px", borderRadius: 10,
+              background: "rgba(255,165,0,0.06)",
+              border: "1px solid rgba(255,165,0,0.2)",
+              display: "flex", gap: 10, alignItems: "flex-start",
+            }}>
+              <span style={{ fontSize: "1rem", flexShrink: 0 }}>⚠️</span>
+              <p style={{ color: "#cc8800", fontSize: "0.68rem", margin: 0, lineHeight: 1.6 }}>
+                Real orders will be placed with <strong style={{ color: BYBIT_ORANGE }}>{leverage}× Isolated Margin</strong>.
+                Ensure your Bybit credentials are saved in Profile and your account has sufficient margin.
+                Risk per trade is set in Profile → Risk Configuration.
+              </p>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </motion.div>
   );
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+//  SignalCard
+// ─────────────────────────────────────────────────────────────────────────────
+function SignalCard({ sig, locked, isCrypto, accent, accentDim, accentBdr }) {
+  const [expanded, setExpanded] = useState(false);
+
+  const isLong     = sig.direction === "LONG";
+  const dirColor   = isLong ? C.green : C.red;
+  const sym        = (sig.instrument ?? sig.symbol ?? "").replace("_", "/");
+  const conf       = sig.confidence ?? 0;
+  const confColor  = conf >= 100 ? accent : conf >= 80 ? C.amber : C.label;
+
+  // Decimal places: crypto needs 4, forex needs 5
+  const dp = isCrypto ? 4 : 5;
+
+  return (
+    <motion.div
+      layout
+      style={{
+        borderRadius: 18, overflow: "hidden",
+        background:   C.card,
+        border:       `1px solid ${locked ? "rgba(255,165,0,0.3)" : C.cardBdr}`,
+        opacity:      locked ? 0.72 : 1,
+        boxShadow:    conf >= 100 ? `0 0 22px ${accent}1a` : "none",
+      }}
+    >
+      {/* ── Header row ──────────────────────────────────────────────────── */}
+      <button
+        onClick={() => setExpanded(p => !p)}
+        style={{
+          width: "100%", background: "transparent", border: "none",
+          padding: "14px 16px", cursor: "pointer",
+          display: "flex", alignItems: "center", gap: 12, textAlign: "left",
+        }}
+      >
+        {/* Direction dot */}
+        <div style={{
+          width: 10, height: 10, borderRadius: "50%", flexShrink: 0,
+          background: dirColor, boxShadow: `0 0 8px ${dirColor}80`,
+        }} />
+
+        {/* Pair + direction */}
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
+            <span style={{
+              color: C.white, fontSize: "0.92rem", fontWeight: 700,
+              fontFamily: FONT_MONO,
+            }}>
+              {sym}
+            </span>
+            <span style={{
+              fontSize: "0.58rem", fontWeight: 800, letterSpacing: "0.1em",
+              padding: "2px 7px", borderRadius: 5,
+              background: `${dirColor}18`, border: `1px solid ${dirColor}40`,
+              color: dirColor, fontFamily: FONT_MONO,
+            }}>
+              {sig.direction}
+            </span>
+            {locked && (
+              <span style={{
+                fontSize: "0.55rem", fontWeight: 700, letterSpacing: "0.08em",
+                padding: "2px 7px", borderRadius: 5,
+                background: "rgba(255,165,0,0.12)", border: "1px solid rgba(255,165,0,0.3)",
+                color: "#FFA500", fontFamily: FONT_MONO,
+              }}>🔒 LOCKED</span>
+            )}
+          </div>
+          <p style={{ color: C.sub, fontSize: "0.6rem", margin: "3px 0 0", fontFamily: FONT_MONO }}>
+            {fmtDate(sig.timestamp)} · {fmtTime(sig.timestamp)}
+          </p>
+        </div>
+
+        {/* Confidence */}
+        <div style={{ textAlign: "right", flexShrink: 0 }}>
+          <motion.p
+            animate={{ color: confColor, textShadow: conf >= 100 ? `0 0 10px ${confColor}` : "none" }}
+            transition={{ duration: 0.3 }}
+            style={{ fontSize: "1.2rem", fontWeight: 800, fontFamily: FONT_MONO, margin: 0 }}
+          >
+            {conf}%
+          </motion.p>
+          <p style={{ color: C.sub, fontSize: "0.55rem", margin: "2px 0 0", letterSpacing: "0.06em" }}>
+            CONFLUENCE
+          </p>
+        </div>
+
+        {/* Expand chevron */}
+        <motion.div
+          animate={{ rotate: expanded ? 180 : 0 }}
+          style={{ color: C.sub, fontSize: "0.7rem", flexShrink: 0 }}
+        >▾</motion.div>
+      </button>
+
+      {/* ── Price levels (always visible) ───────────────────────────────── */}
+      <div style={{
+        display: "grid", gridTemplateColumns: "1fr 1fr 1fr",
+        gap: 1, borderTop: `1px solid ${C.cardBdr}`,
+      }}>
+        {[
+          { label: "ENTRY",  value: fmtPrice(sig.entry, dp), color: C.white },
+          { label: "SL",     value: fmtPrice(sig.sl,    dp), color: C.red   },
+          { label: "TP",     value: fmtPrice(sig.tp,    dp), color: C.green },
+        ].map(({ label, value, color }) => (
+          <div key={label} style={{
+            textAlign: "center", padding: "10px 8px",
+            borderRight: `1px solid ${C.cardBdr}`,
+          }}>
+            <p style={{ color: C.sub, fontSize: "0.52rem", letterSpacing: "0.1em", margin: "0 0 3px", fontFamily: FONT_UI }}>{label}</p>
+            <p style={{ color, fontSize: "0.75rem", fontWeight: 600, margin: 0, fontFamily: FONT_MONO }}>{value}</p>
+          </div>
+        ))}
+      </div>
+
+      {/* ── Expanded detail ─────────────────────────────────────────────── */}
+      <AnimatePresence>
+        {expanded && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.22 }}
+            style={{ overflow: "hidden" }}
+          >
+            <div style={{ padding: "14px 16px", borderTop: `1px solid ${C.cardBdr}` }}>
+
+              {/* Layer badges */}
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
+                <LayerBadge label="L1 Trend" active={!!sig.layer1} value={sig.layer1} accent={accent} />
+                <LayerBadge label="L2 Zone"  active={!!sig.layer2} value={sig.layer2 ? "OB/FVG" : null} accent={accent} />
+                <LayerBadge label="L3 MSS"   active={!!sig.layer3} value={sig.layer3 ? "CHoCH" : null} accent={accent} />
+              </div>
+
+              {/* Detail rows */}
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                <DetailRow label="Breakeven" value={fmtPrice(sig.breakeven, dp)} mono />
+                <DetailRow label="Risk/Reward" value={`1 : ${sig.rr ?? (isCrypto ? "3.0" : "2.0")}`} mono />
+                {isCrypto && (
+                  <DetailRow label="Engine" value="Bybit Linear · 20× Isolated" />
+                )}
+                {locked && (
+                  <div style={{
+                    marginTop: 4, padding: "8px 12px", borderRadius: 8,
+                    background: "rgba(255,165,0,0.07)", border: "1px solid rgba(255,165,0,0.22)",
+                    color: "#FFA500", fontSize: "0.68rem",
+                  }}>
+                    🔒 Trade active for this instrument. New signals suppressed until SL/TP hit or 2h TTL expires.
+                  </div>
+                )}
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </motion.div>
+  );
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  fireNotification — shared across FOREX and CRYPTO signal pipelines.
-//  Deduplicates using the notifiedRef Set to prevent double-firing.
+//  Sub-components
 // ─────────────────────────────────────────────────────────────────────────────
-function fireNotification(sig, notifiedRef) {
-  const confidence = sig.confidence ?? 0;
-  const sigKey     = `${sig.instrument}-${sig.timestamp}`;
+function LayerBadge({ label, active, value, accent }) {
+  return (
+    <div style={{
+      display:    "flex", alignItems: "center", gap: 5,
+      padding:    "4px 10px", borderRadius: 8,
+      background: active ? `${accent}12` : "rgba(255,255,255,0.03)",
+      border:     `1px solid ${active ? `${accent}35` : C.cardBdr}`,
+    }}>
+      <div style={{
+        width: 6, height: 6, borderRadius: "50%",
+        background: active ? accent : C.sub,
+        boxShadow:  active ? `0 0 5px ${accent}` : "none",
+      }} />
+      <span style={{
+        color:         active ? accent : C.sub,
+        fontSize:      "0.6rem", fontWeight: 700,
+        fontFamily:    FONT_MONO, letterSpacing: "0.06em",
+      }}>
+        {label}{value && active ? `: ${value}` : ""}
+      </span>
+    </div>
+  );
+}
 
-  if (confidence >= PUSH_THRESHOLD && !notifiedRef.current.has(sigKey)) {
-    notifiedRef.current.add(sigKey);
-
-    const ins   = sig.instrument ?? "—";
-    const dir   = sig.direction === "LONG" ? "Long" : "Short";
-    const entry = sig.entry != null ? Number(sig.entry).toFixed(5) : "—";
-    const title = `🚨 High Probability Setup: ${ins} ${dir}`;
-    const body  = `Entry at ${entry}  ·  ${confidence}% confluence`;
-
-    showLocalNotification(title, body, {
-      instrument: sig.instrument,
-      direction:  sig.direction,
-      entry:      sig.entry,
-      confidence,
-    });
-
-    if (navigator.vibrate) {
-      navigator.vibrate([200, 100, 200]);
-    }
-  }
+function DetailRow({ label, value, mono }) {
+  return (
+    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+      <span style={{ color: C.sub,   fontSize: "0.7rem",  fontFamily: FONT_UI  }}>{label}</span>
+      <span style={{ color: C.white, fontSize: "0.72rem", fontFamily: mono ? FONT_MONO : FONT_UI, fontWeight: 500 }}>{value}</span>
+    </div>
+  );
 }

@@ -1,18 +1,18 @@
 """
-FX Radiant — FastAPI Backend
-============================
-• Clerk JWT Authentication (verified against Clerk JWKS — RS256, no manual login)
+FX Radiant — FastAPI Backend  v2.3
+===================================
+• Clerk JWT Authentication (RS256 JWKS — no manual login)
 • Oanda v20 WebSocket price streaming + candle polling
-• Bybit V5 REST candle polling + ticker refresh (crypto engine)
-• SMC Confluence Engine — fires signal alerts at 100 % confidence
+• Bybit V5 Linear (Perpetuals) candle polling + ticker refresh  (crypto engine)
+• SMC Confluence Engine — fires signals at 100 % confluence
 • Dynamic SL / Breakeven risk engine
-• Multi-user: per-user credentials stored encrypted in Supabase
+• Multi-user: per-user credentials stored in Supabase
 
 Engine design:
-  OANDA engine  — ema_period=200, rr_ratio=2.0, H1 primary timeframe
-  BYBIT engine  — ema_period=50,  rr_ratio=3.0, H1 primary timeframe
-  (Bybit kline caps at 200 candles; 50-EMA fires meaningful signals on that
-   window.  rr_ratio=3.0 produces the 1:3 signals called for in the spec.)
+  OANDA  — ema_period=200, rr_ratio=2.0, H1  primary timeframe
+  BYBIT  — ema_period=50,  rr_ratio=3.0, H1  primary timeframe
+  (Bybit kline capped at 200 per request; 50-EMA gives meaningful signals.
+   rr_ratio=3.0 matches the 1:3 RR product spec.)
 """
 
 from __future__ import annotations
@@ -26,19 +26,17 @@ import os
 import time
 import urllib.parse
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
-# ── Load .env BEFORE any os.getenv() call ─────────────────────────────────────
+# ── Load .env BEFORE any os.getenv() ──────────────────────────────────────────
 try:
     from dotenv import load_dotenv
     _env_path = Path(__file__).resolve().parent.parent / ".env"
     _loaded   = load_dotenv(_env_path, override=False)
-    if _loaded:
-        print(f"[fx-radiant] ✅ .env loaded from {_env_path}", flush=True)
-    else:
-        print(f"[fx-radiant] ⚠️  No .env found at {_env_path} — using shell env only", flush=True)
+    print(f"[fx-radiant] {'✅' if _loaded else '⚠️ '} .env {'loaded' if _loaded else 'not found'}: {_env_path}",
+          flush=True)
 except ImportError:
     print("[fx-radiant] ⚠️  python-dotenv not installed", flush=True)
 
@@ -73,27 +71,29 @@ SUPABASE_URL              = os.getenv("SUPABASE_URL", "")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Config — Bybit
+#  Config — Bybit V5 Linear (Perpetuals)
 # ─────────────────────────────────────────────────────────────────────────────
 
 BYBIT_BASE = "https://api.bybit.com"
 
-# Global read-only Bybit credentials (optional).
-# Bybit kline + tickers are fully public — no key needed for market data.
-# These env vars are only used for account-level fallback when a user hasn't
-# saved personal credentials.  Leave blank to require personal keys for
-# account access.
+# Optional global read-only Bybit credentials.
+# Public market endpoints (kline, tickers) need NO key.
+# These env vars are only used as fallback for account endpoints when a user
+# hasn't saved personal credentials in their Profile.
 BYBIT_READ_ONLY_KEY    = os.getenv("BYBIT_READ_ONLY_KEY",    "")
 BYBIT_READ_ONLY_SECRET = os.getenv("BYBIT_READ_ONLY_SECRET", "")
 
-# 15 top-volume linear perpetuals — mirrors BYBIT_META in the frontend
+# Default leverage for Bybit auto-execution
+BYBIT_DEFAULT_LEVERAGE = int(os.getenv("BYBIT_DEFAULT_LEVERAGE", "20"))
+
+# 15 high-volume Bybit Linear (USDT perpetual) symbols
 BYBIT_SYMBOLS = [
     "BTCUSDT",  "ETHUSDT",  "SOLUSDT",  "XRPUSDT",  "BNBUSDT",
     "DOGEUSDT", "AVAXUSDT", "ADAUSDT",  "DOTUSDT",  "MATICUSDT",
     "LINKUSDT", "LTCUSDT",  "NEARUSDT", "ATOMUSDT", "UNIUSDT",
 ]
 
-# Cache keyed by Bybit interval strings: "60"=H1, "15"=M15, "5"=M5, "1"=M1
+# Bybit V5 interval strings: "60"=H1, "15"=M15, "5"=M5, "1"=M1
 BYBIT_INTERVALS = ["60", "15", "5", "1"]
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -101,12 +101,15 @@ BYBIT_INTERVALS = ["60", "15", "5", "1"]
 # ─────────────────────────────────────────────────────────────────────────────
 
 INSTRUMENTS = [
+    # Forex majors
     "EUR_USD", "GBP_USD", "USD_JPY", "AUD_USD",
     "NZD_USD", "USD_CAD", "USD_CHF",
+    # Metals
     "XAU_USD",
+    # Indices  (corrected symbols — GER30_EUR/J225_USD/BTC_USD are NOT valid on Oanda v20)
     "NAS100_USD", "US30_USD", "SPX500_USD",
-    "GER30_EUR",  "UK100_GBP", "J225_USD",
-    "BTC_USD",
+    "DE30_EUR",   "UK100_GBP", "JP225_USD",
+    # HK33_HKD removed — practice accounts typically reject it
 ]
 GRANULARITIES = ["M1", "M5", "M15", "H1"]
 
@@ -123,12 +126,17 @@ _user_settings: dict[str, dict] = {}
 
 def _settings(clerk_id: str) -> dict:
     return _user_settings.setdefault(clerk_id, {
-        "auto_trade_enabled": False,
-        "risk_pct":           1.0,
-        "oanda_key_hint":     "",
-        "oanda_account_id":   "",
-        "bybit_key_hint":     "",
-        "bybit_secret_hint":  "",
+        # Oanda
+        "auto_trade_enabled":  False,
+        "risk_pct":            1.0,
+        "oanda_key_hint":      "",
+        "oanda_account_id":    "",
+        # Bybit
+        "bybit_key_hint":      "",
+        "bybit_secret_hint":   "",
+        "bybit_auto_trade":    False,      # Bybit-specific auto-execution toggle
+        "bybit_leverage":      20,         # 10–50×, default 20×
+        "bybit_margin_type":   "ISOLATED", # "ISOLATED" | "CROSS"
     })
 
 _candle_cache:   dict[str, dict[str, list[Candle]]] = {
@@ -150,16 +158,81 @@ _push_subscriptions: set[str] = set()
 _bybit_candle_cache:   dict[str, dict[str, list[Candle]]] = {
     sym: {iv: [] for iv in BYBIT_INTERVALS} for sym in BYBIT_SYMBOLS
 }
-_bybit_prices:         dict[str, float] = {}   # latest price from tickers
+_bybit_prices:         dict[str, float] = {}   # latest mark price
 _bybit_meta:           dict[str, dict]  = {}   # 24 h stats per symbol
 _bybit_signal_history: dict[str, list[dict]] = {sym: [] for sym in BYBIT_SYMBOLS}
 
-# ema_period=50  — fires meaningful signals on ≤200 candle windows
+# ema_period=50  — fires meaningful signals on the ≤1000 candle window
 # rr_ratio=3.0   — 1:3 risk-reward per product spec
 _bybit_engines: dict[str, SMCConfluenceEngine] = {
     sym: SMCConfluenceEngine(sym, ema_period=50, rr_ratio=3.0)
     for sym in BYBIT_SYMBOLS
 }
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  TradeTracker — Signal Deduplication & Trade Lock
+#
+#  Rules:
+#    1. When a trade is placed for a symbol, that symbol is LOCKED.
+#    2. The lock expires automatically after TRADE_LOCK_TTL_SECONDS (2 hours).
+#    3. Locking is set both on auto-execution AND on signal generation — so
+#       even if auto-trade is OFF, we suppress duplicate UI signals.
+#    4. A locked symbol's signals are NOT added to _bybit_signal_history.
+#    5. When the lock expires the engine resets and looks for a fresh setup.
+# ─────────────────────────────────────────────────────────────────────────────
+
+TRADE_LOCK_TTL_SECONDS = 7200  # 2 hours
+
+class TradeTracker:
+    """In-memory trade lock registry.  Thread-safe via asyncio single-thread model."""
+
+    def __init__(self) -> None:
+        # symbol → {direction, entry, expires_at, trade_id}
+        self._locks: dict[str, dict] = {}
+
+    def is_locked(self, symbol: str) -> bool:
+        lock = self._locks.get(symbol)
+        if not lock:
+            return False
+        if time.time() > lock["expires_at"]:
+            del self._locks[symbol]
+            logger.info("TradeTracker: lock EXPIRED for %s", symbol)
+            return False
+        return True
+
+    def lock(self, symbol: str, direction: str, entry: float, trade_id: str = "") -> None:
+        self._locks[symbol] = {
+            "direction":  direction,
+            "entry":      entry,
+            "trade_id":   trade_id,
+            "locked_at":  time.time(),
+            "expires_at": time.time() + TRADE_LOCK_TTL_SECONDS,
+        }
+        logger.info(
+            "TradeTracker: LOCKED %s %s @ %.5f  (expires in 2h)",
+            symbol, direction, entry,
+        )
+
+    def unlock(self, symbol: str) -> None:
+        if symbol in self._locks:
+            del self._locks[symbol]
+            logger.info("TradeTracker: UNLOCKED %s", symbol)
+
+    def get_lock(self, symbol: str) -> dict | None:
+        if not self.is_locked(symbol):
+            return None
+        return self._locks.get(symbol)
+
+    def all_locks(self) -> dict[str, dict]:
+        """Return snapshot of active locks (pruning expired ones first)."""
+        stale = [s for s, l in self._locks.items() if time.time() > l["expires_at"]]
+        for s in stale:
+            del self._locks[s]
+        return dict(self._locks)
+
+
+# Global TradeTracker instance — shared by the refresh loop and API routes
+_trade_tracker = TradeTracker()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -180,7 +253,7 @@ async def _fetch_clerk_jwks() -> None:
         _clerk_jwks.update(keys)
         logger.info("Clerk JWKS: loaded %d key(s)", len(keys))
     except Exception as exc:
-        logger.error("Could not load Clerk JWKS: %s — protected routes will 401", exc)
+        logger.error("Could not load Clerk JWKS: %s", exc)
 
 
 async def _verify_clerk_token(raw_token: str) -> dict:
@@ -350,13 +423,13 @@ async def place_market_order(
 # ─────────────────────────────────────────────────────────────────────────────
 #  Bybit — Supabase credential helpers
 #
-#  Mirror of the Oanda helpers with an identical resolution chain:
+#  Identical resolution chain to the Oanda helpers:
 #    1. Personal key in Supabase for this clerk_id
-#    2. BYBIT_READ_ONLY_KEY from .env
+#    2. BYBIT_READ_ONLY_KEY / BYBIT_READ_ONLY_SECRET from .env
 #    3. None → caller returns HTTP 422
 #
-#  Note: Bybit kline + tickers are fully public; callers that only need
-#  market data never invoke this function.
+#  Note: kline + tickers are fully public — callers that only need
+#  market data must NOT call this (they use the unauthenticated endpoints).
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def _get_user_bybit_creds(clerk_id: str) -> tuple[str, str] | None:
@@ -381,7 +454,6 @@ async def _get_user_bybit_creds(clerk_id: str) -> tuple[str, str] | None:
         rows = resp.json()
         if rows and rows[0].get("bybit_api_key") and rows[0].get("bybit_api_secret"):
             return rows[0]["bybit_api_key"], rows[0]["bybit_api_secret"]
-        # Personal key not saved — fall back to env read-only key
         if BYBIT_READ_ONLY_KEY and BYBIT_READ_ONLY_SECRET:
             return BYBIT_READ_ONLY_KEY, BYBIT_READ_ONLY_SECRET
         return None
@@ -406,8 +478,8 @@ async def _upsert_user_bybit_creds(
         "Prefer":        "resolution=merge-duplicates",
     }
     payload = {
-        "clerk_id":         clerk_id,
-        "bybit_api_key":    api_key,
+        "clerk_id":        clerk_id,
+        "bybit_api_key":   api_key,
         "bybit_api_secret": api_secret,
     }
     async with httpx.AsyncClient(timeout=8) as client:
@@ -417,65 +489,99 @@ async def _upsert_user_bybit_creds(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Bybit — HMAC-SHA256 authentication
+#  Bybit V5 — HMAC-SHA256 authentication
 #
-#  Private endpoints require four headers:
-#    X-BAPI-API-KEY      your API key
-#    X-BAPI-TIMESTAMP    Unix ms (must be within recv_window of server time)
-#    X-BAPI-RECV-WINDOW  allowed clock skew in ms (5000 recommended)
-#    X-BAPI-SIGN         HMAC-SHA256(ts + api_key + recv_window + param_str)
+#  Bybit V5 signed endpoint pattern:
+#    signature = HMAC-SHA256(api_secret, timestamp + api_key + recvWindow + rawParams)
 #
-#  For GET:  param_str = URL-encoded query string (e.g. "accountType=UNIFIED")
-#  For POST: param_str = raw JSON body string
+#  For GET requests: rawParams = URL query string (sorted, URL-encoded)
+#  For POST requests: rawParams = JSON body string
+#
+#  Headers:
+#    X-BAPI-API-KEY, X-BAPI-SIGN, X-BAPI-SIGN-ALGORITHM, X-BAPI-TIMESTAMP,
+#    X-BAPI-RECV-WINDOW
 # ─────────────────────────────────────────────────────────────────────────────
 
-_BYBIT_RECV_WINDOW = "5000"
-
-def _bybit_sign_headers(api_key: str, api_secret: str, param_str: str) -> dict:
-    ts        = str(int(time.time() * 1000))
-    sign_src  = ts + api_key + _BYBIT_RECV_WINDOW + param_str
-    signature = hmac.new(
+def _bybit_sign_get(api_key: str, api_secret: str, params: dict) -> tuple[dict, dict]:
+    """Sign a GET request. Returns (params, headers)."""
+    timestamp   = str(int(time.time() * 1000))
+    recv_window = "5000"
+    query_str   = urllib.parse.urlencode(sorted(params.items()))
+    param_str   = timestamp + api_key + recv_window + query_str
+    signature   = hmac.new(
         api_secret.encode("utf-8"),
-        sign_src.encode("utf-8"),
+        param_str.encode("utf-8"),
         hashlib.sha256,
     ).hexdigest()
-    return {
-        "X-BAPI-API-KEY":     api_key,
-        "X-BAPI-SIGN":        signature,
-        "X-BAPI-TIMESTAMP":   ts,
-        "X-BAPI-RECV-WINDOW": _BYBIT_RECV_WINDOW,
-        "Content-Type":       "application/json",
+    headers = {
+        "X-BAPI-API-KEY":           api_key,
+        "X-BAPI-SIGN":              signature,
+        "X-BAPI-SIGN-ALGORITHM":    "HmacSHA256",
+        "X-BAPI-TIMESTAMP":         timestamp,
+        "X-BAPI-RECV-WINDOW":       recv_window,
+        "Content-Type":             "application/json",
     }
+    return params, headers
 
-def _bybit_qs(params: dict) -> str:
-    """Build URL query string in insertion order for HMAC signing."""
-    return urllib.parse.urlencode(params)
+
+def _bybit_sign_post(api_key: str, api_secret: str, body: dict) -> tuple[dict, dict]:
+    """Sign a POST request. Returns (body, headers)."""
+    import json as _json
+    timestamp   = str(int(time.time() * 1000))
+    recv_window = "5000"
+    body_str    = _json.dumps(body, separators=(",", ":"))
+    param_str   = timestamp + api_key + recv_window + body_str
+    signature   = hmac.new(
+        api_secret.encode("utf-8"),
+        param_str.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    headers = {
+        "X-BAPI-API-KEY":        api_key,
+        "X-BAPI-SIGN":           signature,
+        "X-BAPI-SIGN-ALGORITHM": "HmacSHA256",
+        "X-BAPI-TIMESTAMP":      timestamp,
+        "X-BAPI-RECV-WINDOW":    recv_window,
+        "Content-Type":          "application/json",
+    }
+    return body, headers
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Bybit — public market data helpers (no credentials required)
+#  Bybit V5 — public market data helpers (no credentials required)
+#
+#  Bybit kline + tickers are fully public — no API key needed.
+#  Used by both the refresh loop and the candles/market routes.
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def bybit_fetch_candles(
-    symbol: str,
-    interval: str,
-    limit: int = 200,
+    symbol:   str,
+    interval: str,   # "60"=H1, "15"=M15, "5"=M5, "1"=M1
+    limit:    int = 200,
 ) -> list[Candle]:
     """
-    Fetch up to `limit` completed candles from Bybit's public kline endpoint.
+    Fetch up to `limit` completed candles from Bybit V5 Linear kline endpoint.
 
-    Bybit returns rows newest-first; we reverse so index 0 is the oldest
-    candle, matching the convention expected by SMCConfluenceEngine.
+    Bybit returns candles NEWEST-FIRST — we reverse to oldest-first for the
+    SMC engine so index 0 is the oldest candle.
 
-    Row format:  [startTime(ms), open, high, low, close, volume, turnover]
-    The last row (index 0 after reversal) is the still-forming current
-    candle — we drop it so only complete candles are analysed.
+    Row format (list[0]):
+        0: startTime (ms)
+        1: openPrice
+        2: highPrice
+        3: lowPrice
+        4: closePrice
+        5: volume (base asset, e.g. BTC)
+        6: turnover (USDT)
+
+    The first row (index 0 in Bybit's response) is the still-forming current
+    candle — we drop it so only complete candles are fed to the SMC engine.
     """
     params = {
         "category": "linear",
         "symbol":   symbol,
         "interval": interval,
-        "limit":    str(limit),
+        "limit":    str(min(limit, 200)),
     }
     async with httpx.AsyncClient(timeout=20) as client:
         resp = await client.get(f"{BYBIT_BASE}/v5/market/kline", params=params)
@@ -483,37 +589,40 @@ async def bybit_fetch_candles(
 
     data = resp.json()
     if data.get("retCode", -1) != 0:
-        raise RuntimeError(
-            f"Bybit kline error {data.get('retCode')}: {data.get('retMsg')}"
-        )
+        raise RuntimeError(f"Bybit kline error {data.get('retCode')}: {data.get('retMsg')}")
 
-    rows    = data["result"]["list"]   # newest first from Bybit
-    candles = []
-    for row in reversed(rows):         # oldest first after reversal
-        ts, o, h, l, c, vol, _ = row
-        candles.append(Candle(
-            time   = int(ts) // 1000,  # milliseconds → seconds
-            open   = float(o),
-            high   = float(h),
-            low    = float(l),
-            close  = float(c),
-            volume = float(vol),
-        ))
-    # Drop the final (still-forming) candle
+    rows = data.get("result", {}).get("list", [])
+    if not isinstance(rows, list):
+        raise RuntimeError(f"Bybit kline unexpected format: {str(rows)[:200]}")
+
+    candles = [
+        Candle(
+            time   = int(row[0]) // 1000,  # ms → seconds
+            open   = float(row[1]),
+            high   = float(row[2]),
+            low    = float(row[3]),
+            close  = float(row[4]),
+            volume = float(row[5]),
+        )
+        for row in rows
+        if len(row) >= 6
+    ]
+    # Bybit returns newest-first — reverse to oldest-first, drop forming candle
+    candles.reverse()
     return candles[:-1] if candles else candles
 
 
 async def bybit_fetch_tickers(symbols: list[str]) -> dict[str, dict]:
     """
-    Fetch 24 h ticker data for all linear perpetuals in one request,
-    then filter to the requested symbol set.
+    Fetch 24 h ticker stats for all Bybit Linear symbols in one request,
+    filtered to the requested symbol set.
 
     Returns dict keyed by symbol:
-        price      — latest trade price
+        price      — latest mark price
         high24h    — 24 h high
         low24h     — 24 h low
         volume24h  — 24 h turnover in USDT
-        change24h  — 24 h price change as a percentage float (e.g. 2.34)
+        change24h  — 24 h price change percent (float, e.g. 1.23)
     """
     async with httpx.AsyncClient(timeout=15) as client:
         resp = await client.get(
@@ -524,25 +633,25 @@ async def bybit_fetch_tickers(symbols: list[str]) -> dict[str, dict]:
 
     data = resp.json()
     if data.get("retCode", -1) != 0:
-        raise RuntimeError(
-            f"Bybit tickers error {data.get('retCode')}: {data.get('retMsg')}"
-        )
+        raise RuntimeError(f"Bybit tickers error {data.get('retCode')}: {data.get('retMsg')}")
 
+    items  = data.get("result", {}).get("list", [])
     sym_set = set(symbols)
     result: dict[str, dict] = {}
-    for item in data["result"]["list"]:
+
+    for item in items:
         sym = item.get("symbol", "")
         if sym not in sym_set:
             continue
         try:
             result[sym] = {
-                "price":    float(item.get("lastPrice",    0) or 0),
-                "high24h":  float(item.get("highPrice24h", 0) or 0),
-                "low24h":   float(item.get("lowPrice24h",  0) or 0),
-                # turnover24h is the USDT-denominated volume (not contract qty)
-                "volume24h": float(item.get("turnover24h",  0) or 0),
-                # price24hPcnt is already a decimal like 0.0234 — multiply by 100
-                "change24h": float(item.get("price24hPcnt", 0) or 0) * 100,
+                "price":    float(item.get("lastPrice",       0) or 0),
+                "high24h":  float(item.get("highPrice24h",    0) or 0),
+                "low24h":   float(item.get("lowPrice24h",     0) or 0),
+                # turnover24h is USDT-denominated
+                "volume24h": float(item.get("turnover24h",   0) or 0),
+                # price24hPcnt is a decimal like "0.0123" → convert to percent
+                "change24h": round(float(item.get("price24hPcnt", 0) or 0) * 100, 2),
             }
         except (ValueError, TypeError):
             pass
@@ -550,14 +659,22 @@ async def bybit_fetch_tickers(symbols: list[str]) -> dict[str, dict]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Bybit — private account helpers (HMAC auth required)
+#  Bybit V5 — private account helpers (HMAC auth required)
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def bybit_fetch_wallet(api_key: str, api_secret: str) -> dict:
-    """Fetch UTA wallet balance. Returns the first account entry."""
-    params  = {"accountType": "UNIFIED"}
-    qs      = _bybit_qs(params)
-    headers = _bybit_sign_headers(api_key, api_secret, qs)
+async def bybit_fetch_account(api_key: str, api_secret: str) -> dict:
+    """
+    Fetch Bybit Unified Trading Account balance.
+
+    Normalized response:
+        accountType      — "UNIFIED"
+        totalEquity      — total equity in USDT
+        totalAvailable   — available balance
+        totalMargin      — margin in use
+        coin             — list of non-zero coin balances
+        totalUSDT        — convenience alias for totalEquity
+    """
+    params, headers = _bybit_sign_get(api_key, api_secret, {"accountType": "UNIFIED"})
 
     async with httpx.AsyncClient(timeout=20) as client:
         resp = await client.get(
@@ -568,17 +685,42 @@ async def bybit_fetch_wallet(api_key: str, api_secret: str) -> dict:
 
     data = resp.json()
     if data.get("retCode", -1) != 0:
-        raise RuntimeError(f"Bybit wallet error {data.get('retCode')}: {data.get('retMsg')}")
+        raise RuntimeError(f"Bybit account error {data.get('retCode')}: {data.get('retMsg')}")
 
-    accounts = data["result"]["list"]
-    return accounts[0] if accounts else {}
+    account = (data.get("result", {}).get("list") or [{}])[0]
+
+    total_equity    = float(account.get("totalEquity",           0) or 0)
+    total_available = float(account.get("totalAvailableBalance", 0) or 0)
+    total_margin    = float(account.get("totalMarginBalance",    0) or 0)
+
+    # Filter to non-zero coin balances
+    coins = [
+        c for c in account.get("coin", [])
+        if float(c.get("walletBalance", 0) or 0) > 0
+    ]
+
+    return {
+        "accountType":           account.get("accountType", "UNIFIED"),
+        "totalEquity":           round(total_equity,    2),
+        "totalMarginBalance":    round(total_margin,    2),   # alias for frontend compatibility
+        "totalAvailableBalance": round(total_available, 2),   # alias for frontend compatibility
+        "totalAvailable":        round(total_available, 2),
+        "totalMargin":           round(total_margin,    2),
+        "totalUSDT":             round(total_equity,    2),   # convenience alias
+        "coin":                  coins,
+    }
 
 
 async def bybit_fetch_positions(api_key: str, api_secret: str) -> list:
-    """Return all open (non-zero size) linear perpetual positions."""
-    params  = {"category": "linear", "settleCoin": "USDT", "limit": "50"}
-    qs      = _bybit_qs(params)
-    headers = _bybit_sign_headers(api_key, api_secret, qs)
+    """
+    Fetch open Linear (USDT perpetual) positions for this account.
+    Returns [] when no positions are open.
+    """
+    params, headers = _bybit_sign_get(api_key, api_secret, {
+        "category":   "linear",
+        "settleCoin": "USDT",
+        "limit":      "50",
+    })
 
     async with httpx.AsyncClient(timeout=20) as client:
         resp = await client.get(
@@ -591,19 +733,21 @@ async def bybit_fetch_positions(api_key: str, api_secret: str) -> list:
     if data.get("retCode", -1) != 0:
         raise RuntimeError(f"Bybit positions error {data.get('retCode')}: {data.get('retMsg')}")
 
-    return [
-        p for p in data["result"]["list"]
-        if float(p.get("size", 0) or 0) > 0
-    ]
+    positions = data.get("result", {}).get("list", [])
+    # Only return positions with non-zero size
+    return [p for p in positions if float(p.get("size", 0) or 0) > 0]
 
 
 async def bybit_fetch_trade_history(
     api_key: str, api_secret: str, limit: int = 50,
 ) -> list:
-    """Return recent closed trade executions (fills) from /v5/execution/list."""
-    params  = {"category": "linear", "limit": str(min(limit, 100))}
-    qs      = _bybit_qs(params)
-    headers = _bybit_sign_headers(api_key, api_secret, qs)
+    """
+    Fetch recent execution history for Linear category.
+    """
+    params, headers = _bybit_sign_get(api_key, api_secret, {
+        "category": "linear",
+        "limit":    str(min(limit, 100)),
+    })
 
     async with httpx.AsyncClient(timeout=20) as client:
         resp = await client.get(
@@ -614,32 +758,255 @@ async def bybit_fetch_trade_history(
 
     data = resp.json()
     if data.get("retCode", -1) != 0:
-        raise RuntimeError(f"Bybit execution list error {data.get('retCode')}: {data.get('retMsg')}")
+        raise RuntimeError(f"Bybit history error {data.get('retCode')}: {data.get('retMsg')}")
 
-    return data["result"]["list"]
+    trades = data.get("result", {}).get("list", [])
+    trades.sort(key=lambda t: int(t.get("execTime", 0)), reverse=True)
+    return trades
+
+
+async def bybit_set_margin_mode(
+    api_key: str, api_secret: str, symbol: str, margin_type: str = "ISOLATED",
+) -> None:
+    """
+    Set margin mode for a symbol to ISOLATED or CROSS.
+    retCode 110043 = already in that mode (not an error).
+    """
+    body = {
+        "category":   "linear",
+        "symbol":     symbol,
+        "tradeMode":  1 if margin_type == "ISOLATED" else 0,
+        "buyLeverage":  str(BYBIT_DEFAULT_LEVERAGE),
+        "sellLeverage": str(BYBIT_DEFAULT_LEVERAGE),
+    }
+    _, headers = _bybit_sign_post(api_key, api_secret, body)
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(
+                f"{BYBIT_BASE}/v5/position/switch-isolated",
+                headers=headers, json=body,
+            )
+        data = resp.json()
+        if data.get("retCode", -1) not in (0, 110043):
+            logger.warning("Bybit set-margin-mode %s: code=%s msg=%s",
+                           symbol, data.get("retCode"), data.get("retMsg"))
+    except Exception as exc:
+        logger.warning("Bybit set-margin-mode %s: %s", symbol, exc)
+
+
+async def bybit_set_leverage(
+    api_key: str, api_secret: str, symbol: str, leverage: int,
+    margin_type: str = "ISOLATED",
+) -> None:
+    """Set leverage (and margin mode) for a symbol before placing an order."""
+    # Set margin mode first — must be done before changing leverage
+    await bybit_set_margin_mode(api_key, api_secret, symbol, margin_type)
+
+    body = {
+        "category":     "linear",
+        "symbol":       symbol,
+        "buyLeverage":  str(leverage),
+        "sellLeverage": str(leverage),
+    }
+    _, headers = _bybit_sign_post(api_key, api_secret, body)
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.post(
+            f"{BYBIT_BASE}/v5/position/set-leverage",
+            headers=headers, json=body,
+        )
+    data = resp.json()
+    if data.get("retCode", -1) not in (0, 110043):  # 110043 = leverage unchanged
+        logger.warning("Bybit set-leverage %s: code=%s msg=%s",
+                       symbol, data.get("retCode"), data.get("retMsg"))
+
+
+async def bybit_place_market_order(
+    api_key:     str,
+    api_secret:  str,
+    symbol:      str,
+    side:        str,        # "Buy" | "Sell"
+    qty:         str,        # base asset quantity as string, e.g. "0.001"
+    stop_loss:   float,
+    take_profit: float,
+    leverage:    int  = BYBIT_DEFAULT_LEVERAGE,
+    margin_type: str  = "ISOLATED",
+) -> dict:
+    """
+    Place a Bybit Linear perpetual market order with SL + TP.
+    Sets margin mode + leverage first, then submits the order.
+    Default: 20x Isolated Margin (per product spec).
+    """
+    await bybit_set_leverage(api_key, api_secret, symbol, leverage, margin_type)
+
+    body = {
+        "category":    "linear",
+        "symbol":      symbol,
+        "side":        side,
+        "orderType":   "Market",
+        "qty":         qty,
+        "stopLoss":    f"{stop_loss:.4f}",
+        "takeProfit":  f"{take_profit:.4f}",
+        "timeInForce": "IOC",
+        "positionIdx": 0,   # 0 = one-way mode
+    }
+    _, headers = _bybit_sign_post(api_key, api_secret, body)
+
+    async with httpx.AsyncClient(timeout=20) as client:
+        resp = await client.post(
+            f"{BYBIT_BASE}/v5/order/create",
+            headers=headers, json=body,
+        )
+        resp.raise_for_status()
+
+    data = resp.json()
+    if data.get("retCode", -1) != 0:
+        raise RuntimeError(f"Bybit order error {data.get('retCode')}: {data.get('retMsg')}")
+
+    logger.info("✅ Bybit order placed: %s %s %s  qty=%s", symbol, side, "Market", qty)
+    return data
 
 
 async def bybit_verify_credentials(api_key: str, api_secret: str) -> bool:
-    """Verify credentials by calling wallet-balance. Raises RuntimeError on failure."""
-    await bybit_fetch_wallet(api_key, api_secret)
+    """Verify credentials by fetching account info. Raises RuntimeError on failure."""
+    await bybit_fetch_account(api_key, api_secret)
     return True
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Bybit — background refresh loop
+#  Bybit V5 — background refresh loop
 #
-#  Mirrors candle_refresh_loop() for the Oanda side:
-#    Every 60 s:
-#      1. Refresh tickers for all 15 symbols (single public request)
-#      2. Refresh H1 + M15 + M5 + M1 candles per symbol
-#      3. Run SMC analysis on H1 candles; fire signals at 100% confluence
+#  Every 60 s:
+#    1. Refresh tickers for all 15 symbols (single public request)
+#    2. Refresh H1 + M15 + M5 + M1 candles per symbol
+#    3. Run SMC analysis on H1 candles; emit signals at 100% confluence
 #
-#  Design decisions:
-#    • Ticker refresh is one request covering all symbols — efficient
-#    • Candle fetches are sequential per symbol to avoid hammering the API
-#    • Per-symbol exponential backoff on repeated failures
-#    • SMC minimum: 60 H1 candles (enough for 50-EMA to be valid)
+#  Key Bybit differences from Oanda:
+#    • Bybit candles are newest-first in API response — bybit_fetch_candles()
+#      reverses to oldest-first for the SMC engine.
+#    • Maximum 200 candles per Bybit request (use limit=200).
+#    • Minimum 60 H1 candles gate for the 50-EMA to be valid.
 # ─────────────────────────────────────────────────────────────────────────────
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  _bybit_auto_execute — fires a market order for every user who has
+#  bybit_auto_trade=True AND has valid Bybit credentials in Supabase.
+#
+#  Safety guards:
+#    • Instrument must NOT already be locked by TradeTracker
+#    • Minimum qty check: Bybit requires qty ≥ minOrderQty (0.001 for BTCUSDT)
+#    • Leverage auto-scale: if SL distance × leverage > 80% of position value,
+#      reduce leverage until within safe margin
+# ─────────────────────────────────────────────────────────────────────────────
+
+_MIN_ORDER_QTY: dict[str, float] = {
+    "BTCUSDT": 0.001, "ETHUSDT": 0.01, "SOLUSDT": 0.1, "XRPUSDT": 10.0,
+    "BNBUSDT": 0.01, "DOGEUSDT": 100.0, "AVAXUSDT": 0.1, "ADAUSDT": 10.0,
+    "DOTUSDT": 1.0, "MATICUSDT": 10.0, "LINKUSDT": 1.0, "LTCUSDT": 0.1,
+    "NEARUSDT": 1.0, "ATOMUSDT": 1.0, "UNIUSDT": 1.0,
+}
+
+def _compute_safe_leverage(
+    entry: float, sl: float, leverage: int, margin_usd: float = 100.0,
+) -> int:
+    """
+    Auto-scale leverage down if sl_distance × leverage > 80% of margin.
+    Returns the adjusted leverage (minimum 1×).
+    """
+    sl_distance = abs(entry - sl)
+    if sl_distance <= 0 or entry <= 0:
+        return leverage
+    # Risk per unit at full leverage
+    risk_ratio = (sl_distance / entry) * leverage
+    while risk_ratio > 0.8 and leverage > 1:
+        leverage -= 1
+        risk_ratio = (sl_distance / entry) * leverage
+    return leverage
+
+
+async def _bybit_auto_execute(
+    sym: str, sig_dict: dict, signal: "TradeSignal",
+) -> None:
+    """
+    Called when a 100% confluence Bybit signal fires.
+    Iterates over all users with bybit_auto_trade=True and places orders.
+    """
+    if _trade_tracker.is_locked(sym):
+        logger.info("AutoExec: %s already locked — skip", sym)
+        return
+
+    for clerk_id, prefs in list(_user_settings.items()):
+        if not prefs.get("bybit_auto_trade"):
+            continue
+
+        leverage    = int(prefs.get("bybit_leverage",    BYBIT_DEFAULT_LEVERAGE))
+        margin_type = str(prefs.get("bybit_margin_type", "ISOLATED"))
+
+        creds = await _get_user_bybit_creds(clerk_id)
+        if not creds:
+            logger.warning("AutoExec: no Bybit creds for %s… — skip", clerk_id[:8])
+            continue
+
+        api_key, api_secret = creds
+
+        # Fetch account equity to size position at 1% risk
+        try:
+            account_data = await bybit_fetch_account(api_key, api_secret)
+            equity       = float(account_data.get("totalEquity", 0) or 0)
+        except Exception as exc:
+            logger.warning("AutoExec: account fetch failed for %s…: %s", clerk_id[:8], exc)
+            continue
+
+        if equity <= 0:
+            logger.warning("AutoExec: zero equity for %s… — skip", clerk_id[:8])
+            continue
+
+        risk_pct   = float(prefs.get("risk_pct", 1.0)) / 100.0
+        risk_usd   = equity * risk_pct
+        entry      = signal.entry_price
+        sl         = signal.stop_loss
+        tp         = signal.take_profit
+        sl_dist    = abs(entry - sl)
+
+        if sl_dist <= 0:
+            logger.warning("AutoExec: zero SL distance for %s — skip", sym)
+            continue
+
+        # Auto-scale leverage to keep risk ≤ 80% of margin
+        safe_lev = _compute_safe_leverage(entry, sl, leverage)
+        if safe_lev != leverage:
+            logger.info(
+                "AutoExec: leverage scaled %d→%d× for %s (SL distance safety)",
+                leverage, safe_lev, sym,
+            )
+
+        # qty = risk_usd / (sl_dist_per_unit × leverage)
+        # This means losing the SL distance costs exactly risk_usd
+        qty_raw  = (risk_usd * safe_lev) / (sl_dist * entry) if entry > 0 else 0
+        min_qty  = _MIN_ORDER_QTY.get(sym, 0.001)
+        qty      = max(round(qty_raw, 3), min_qty)
+        side     = "Buy" if signal.direction.value == "LONG" else "Sell"
+
+        try:
+            result = await bybit_place_market_order(
+                api_key, api_secret, sym, side,
+                str(qty), sl, tp, safe_lev, margin_type,
+            )
+            trade_id = (
+                result.get("result", {}).get("orderId", "")
+                or result.get("result", {}).get("orderLinkId", "")
+            )
+            # Lock the instrument to prevent signal spam
+            _trade_tracker.lock(sym, signal.direction.value, entry, trade_id)
+            logger.info(
+                "✅ AutoExec ORDER PLACED: %s %s %s  qty=%.3f  lev=%d×  "
+                "entry=%.4f  sl=%.4f  tp=%.4f  clerk=%s…",
+                sym, side, margin_type, qty, safe_lev,
+                entry, sl, tp, clerk_id[:8],
+            )
+        except Exception as exc:
+            logger.error("AutoExec ORDER FAILED %s for %s…: %s", sym, clerk_id[:8], exc)
+
 
 async def bybit_refresh_loop() -> None:
     FETCH_TIMEOUT = 20.0
@@ -695,47 +1062,62 @@ async def bybit_refresh_loop() -> None:
                             h1, price, int(time.time()),
                         )
                         if signal:
-                            sig_dict = {
-                                "type":       "BYBIT_SIGNAL",
-                                "symbol":     sym,
-                                "instrument": sym,          # frontend normalisation field
-                                "direction":  signal.direction.value,
-                                "entry":      round(signal.entry_price,     5),
-                                "sl":         round(signal.stop_loss,       5),
-                                "tp":         round(signal.take_profit,     5),
-                                "breakeven":  round(signal.breakeven_price, 5),
-                                "rr":         signal.risk_reward,
-                                "confidence": signal.confidence,
-                                "layer1":     signal.layer1_bias,
-                                "layer2":     signal.layer2_zone,
-                                "layer3":     signal.layer3_mss,
-                                "timestamp":  signal.timestamp,
-                            }
-                            _bybit_signal_history[sym] = (
-                                [sig_dict] + _bybit_signal_history[sym]
-                            )[:50]
-                            logger.info("₿ SIGNAL: %s %s  rr=1:%.1f",
-                                        sym, signal.direction.value, signal.risk_reward)
-
-                            if signal.confidence >= 95:
-                                label      = sym.replace("USDT", "/USDT")
-                                push_title = f"🚨 Crypto Setup: {label} {signal.direction.value.title()}"
-                                push_body  = (
-                                    f"Entry {signal.entry_price:.4f}  ·  "
-                                    f"{signal.confidence}% confluence  ·  "
-                                    f"R:R 1:{signal.risk_reward}"
+                            # ── Signal deduplication: skip if instrument locked ──
+                            if _trade_tracker.is_locked(sym):
+                                logger.debug(
+                                    "TradeTracker: SKIP %s %s — instrument locked",
+                                    sym, signal.direction.value,
                                 )
-                                asyncio.create_task(_send_onesignal_push(
-                                    title = push_title,
-                                    body  = push_body,
-                                    data  = {
-                                        "symbol":     sym,
-                                        "direction":  signal.direction.value,
-                                        "entry":      round(signal.entry_price, 5),
-                                        "confidence": signal.confidence,
-                                        "engine":     "BYBIT",
-                                    },
-                                ))
+                            else:
+                                sig_dict = {
+                                    "type":       "BYBIT_SIGNAL",
+                                    "symbol":     sym,
+                                    "instrument": sym,
+                                    "direction":  signal.direction.value,
+                                    "entry":      round(signal.entry_price,     5),
+                                    "sl":         round(signal.stop_loss,       5),
+                                    "tp":         round(signal.take_profit,     5),
+                                    "breakeven":  round(signal.breakeven_price, 5),
+                                    "rr":         signal.risk_reward,
+                                    "confidence": signal.confidence,
+                                    "layer1":     signal.layer1_bias,
+                                    "layer2":     signal.layer2_zone,
+                                    "layer3":     signal.layer3_mss,
+                                    "timestamp":  signal.timestamp,
+                                }
+                                _bybit_signal_history[sym] = (
+                                    [sig_dict] + _bybit_signal_history[sym]
+                                )[:50]
+                                logger.info("BYBIT SIGNAL: %s %s  conf=%d%%  rr=1:%.1f",
+                                            sym, signal.direction.value,
+                                            signal.confidence, signal.risk_reward)
+
+                                # ── Push notification (≥95% confluence) ────────
+                                if signal.confidence >= 95:
+                                    label      = sym.replace("USDT", "/USDT")
+                                    push_title = f"🚨 Crypto Setup: {label} {signal.direction.value.title()}"
+                                    push_body  = (
+                                        f"Entry {signal.entry_price:.4f}  ·  "
+                                        f"{signal.confidence}% confluence  ·  "
+                                        f"R:R 1:{signal.risk_reward}"
+                                    )
+                                    asyncio.create_task(_send_onesignal_push(
+                                        title = push_title,
+                                        body  = push_body,
+                                        data  = {
+                                            "symbol":     sym,
+                                            "direction":  signal.direction.value,
+                                            "entry":      round(signal.entry_price, 5),
+                                            "confidence": signal.confidence,
+                                            "engine":     "BYBIT",
+                                        },
+                                    ))
+
+                                # ── Auto-execution at 100% confluence ───────────
+                                if signal.confidence >= 100:
+                                    asyncio.create_task(
+                                        _bybit_auto_execute(sym, sig_dict, signal)
+                                    )
                 except Exception as smc_exc:
                     logger.warning("Bybit SMC error %s: %s", sym, smc_exc)
 
@@ -791,8 +1173,7 @@ async def _send_onesignal_push(title: str, body: str, data: dict) -> None:
         if resp.status_code not in (200, 201):
             logger.warning("OneSignal push failed: %s — %s", resp.status_code, resp.text[:200])
         else:
-            logger.info("📲 Push sent to %d subscriber(s): %s",
-                        len(_push_subscriptions), body[:60])
+            logger.info("📲 Push sent to %d sub(s): %s", len(_push_subscriptions), body[:60])
     except Exception as exc:
         logger.warning("OneSignal push error: %s", exc)
 
@@ -821,12 +1202,10 @@ async def candle_refresh_loop() -> None:
                 backoff = min(5.0 * (2 ** max(0, fails - 1)), MAX_BACKOFF) if fails > 0 else 0.0
                 if backoff:
                     await asyncio.sleep(backoff)
-
                 for gran in GRANULARITIES:
                     result = await _fetch_safe(ins, gran)
                     if result is not None:
                         _candle_cache[ins][gran] = result
-
                 try:
                     h1    = _candle_cache[ins]["H1"]
                     price = _latest_prices.get(ins)
@@ -853,7 +1232,6 @@ async def candle_refresh_loop() -> None:
                             _signal_history[ins] = ([sig_dict] + _signal_history[ins])[:50]
                             await broadcast(sig_dict)
                             logger.info("🟢 SIGNAL: %s %s", ins, signal.direction.value)
-
                             if signal.confidence >= 95:
                                 asyncio.create_task(_send_onesignal_push(
                                     title = f"🚨 High Probability Setup: {ins.replace('_','/')} {signal.direction.value.title()}",
@@ -871,12 +1249,10 @@ async def candle_refresh_loop() -> None:
                                 ))
                 except Exception as smc_exc:
                     logger.warning("SMC error %s: %s", ins, smc_exc)
-
         except Exception as loop_exc:
             logger.error("candle_refresh_loop error: %s — restart in 10s", loop_exc)
             await asyncio.sleep(10)
             continue
-
         await asyncio.sleep(60)
 
 
@@ -923,18 +1299,18 @@ async def price_stream_loop() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("━" * 60)
-    logger.info("  FX Radiant v2.1 — Oanda + Bybit dual engine")
+    logger.info("  FX Radiant v2.3 — Oanda + Bybit dual engine")
     await _fetch_clerk_jwks()
 
-    logger.info("  OANDA_API_KEY      : %s",
+    logger.info("  OANDA_API_KEY       : %s",
                 "✅ set" if os.environ.get("OANDA_API_KEY",    "").strip() else "❌ MISSING")
-    logger.info("  OANDA_ACCOUNT_ID   : %s",
+    logger.info("  OANDA_ACCOUNT_ID    : %s",
                 "✅ set" if os.environ.get("OANDA_ACCOUNT_ID", "").strip() else "❌ MISSING")
-    logger.info("  BYBIT_READ_ONLY_KEY: %s",
+    logger.info("  BYBIT_READ_ONLY_KEY : %s",
                 "✅ set" if BYBIT_READ_ONLY_KEY else "⚠️  not set (public market data only)")
-    logger.info("  SUPABASE_URL       : %s",
+    logger.info("  SUPABASE_URL        : %s",
                 "✅ set" if SUPABASE_URL else "⚠️  not set (env-only credentials)")
-    logger.info("  Clerk keys cached  : %d", len(_clerk_jwks))
+    logger.info("  Clerk keys cached : %d", len(_clerk_jwks))
     logger.info("━" * 60)
 
     # ── Seed Oanda candles ───────────────────────────────────────────────────
@@ -969,7 +1345,7 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.warning("Bybit ticker seed: %s", exc)
 
-    # ── Seed Bybit candles (H1 + M15 only for fast startup) ─────────────────
+    # ── Seed Bybit candles (H1 + M15 for fast startup) ───────────────────────
     async def _safe_bybit_seed(sym: str, iv: str):
         try:
             return sym, iv, await asyncio.wait_for(
@@ -1003,7 +1379,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="FX Radiant API",
-    version="2.1.0",
+    version="2.2.0",
     description="SMC/ICT — Oanda + Bybit dual engine, Clerk JWT auth",
     lifespan=lifespan,
 )
@@ -1048,6 +1424,12 @@ class BybitCredentialsRequest(BaseModel):
 class PushRegisterRequest(BaseModel):
     player_id: str
 
+
+class BybitSettingsRequest(BaseModel):
+    bybit_auto_trade:  Optional[bool]  = None
+    bybit_leverage:    Optional[int]   = None   # 10–50
+    bybit_margin_type: Optional[str]   = None   # "ISOLATED" | "CROSS"
+
 class UserSettingsRequest(BaseModel):
     auto_trade_enabled: Optional[bool]  = None
     risk_pct:           Optional[float] = None
@@ -1062,8 +1444,8 @@ class UserSettingsRequest(BaseModel):
 @app.get("/api/auth/me")
 async def me(payload: dict = Depends(get_current_user)):
     """
-    Return this user's backend settings, including both Oanda and Bybit
-    credential hints so the Profile page can render both sections correctly.
+    Return backend settings for this user, including both Oanda and Bybit
+    credential hints so the Profile page renders both sections correctly.
     """
     clerk_id = payload["sub"]
     s = _settings(clerk_id)
@@ -1079,7 +1461,7 @@ async def me(payload: dict = Depends(get_current_user)):
         except Exception:
             pass
 
-    # Lazily populate Bybit hints (only from personal rows, not global fallback)
+    # Lazily populate Bybit hints from personal Supabase row (not global fallback)
     bybit_key_hint    = s.get("bybit_key_hint",    "")
     bybit_secret_hint = s.get("bybit_secret_hint", "")
     if not bybit_key_hint and SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY:
@@ -1112,6 +1494,10 @@ async def me(payload: dict = Depends(get_current_user)):
         "oanda_account_id":   account_id,
         "bybit_key_hint":     bybit_key_hint,
         "bybit_secret_hint":  bybit_secret_hint,
+        # Bybit trading preferences
+        "bybit_auto_trade":   s.get("bybit_auto_trade",  False),
+        "bybit_leverage":     s.get("bybit_leverage",    BYBIT_DEFAULT_LEVERAGE),
+        "bybit_margin_type":  s.get("bybit_margin_type", "ISOLATED"),
     }
 
 
@@ -1171,8 +1557,8 @@ async def save_bybit_credentials(
     Validate and persist the user's Bybit API key + secret.
 
     1. Both fields required
-    2. Verify by calling wallet-balance — retCode != 0 → HTTP 422
-    3. Upsert into Supabase  (bybit_api_key, bybit_api_secret columns)
+    2. Verify by calling bybit_verify_credentials() — any error → HTTP 422
+    3. Upsert into Supabase (bybit_api_key, bybit_api_secret columns)
     4. Cache last-4-char hints in _user_settings for immediate /auth/me hydration
     """
     clerk_id   = payload["sub"]
@@ -1271,20 +1657,87 @@ async def get_signals(_: dict = Depends(get_current_user)):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+#  Bybit trading settings & trade tracker routes
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.patch("/api/bybit/settings")
+async def update_bybit_settings(
+    body:    BybitSettingsRequest,
+    payload: dict = Depends(get_current_user),
+):
+    """
+    Update per-user Bybit trading settings:
+      • bybit_auto_trade  — enable/disable auto-execution
+      • bybit_leverage    — 10–50× (default 20)
+      • bybit_margin_type — "ISOLATED" | "CROSS"
+    """
+    clerk_id = payload["sub"]
+    s = _settings(clerk_id)
+
+    if body.bybit_auto_trade is not None:
+        s["bybit_auto_trade"] = body.bybit_auto_trade
+        logger.info(
+            "Bybit auto-trade %s for %s…",
+            "ENABLED" if body.bybit_auto_trade else "DISABLED",
+            clerk_id[:8],
+        )
+
+    if body.bybit_leverage is not None:
+        s["bybit_leverage"] = max(1, min(50, int(body.bybit_leverage)))
+
+    if body.bybit_margin_type is not None:
+        if body.bybit_margin_type not in ("ISOLATED", "CROSS"):
+            raise HTTPException(400, "bybit_margin_type must be 'ISOLATED' or 'CROSS'")
+        s["bybit_margin_type"] = body.bybit_margin_type
+
+    return {
+        "clerk_id":          clerk_id,
+        "bybit_auto_trade":  s["bybit_auto_trade"],
+        "bybit_leverage":    s["bybit_leverage"],
+        "bybit_margin_type": s["bybit_margin_type"],
+    }
+
+
+@app.get("/api/bybit/settings")
+async def get_bybit_settings(payload: dict = Depends(get_current_user)):
+    """Return current Bybit trading settings for this user."""
+    clerk_id = payload["sub"]
+    s = _settings(clerk_id)
+    return {
+        "bybit_auto_trade":  s.get("bybit_auto_trade",  False),
+        "bybit_leverage":    s.get("bybit_leverage",    BYBIT_DEFAULT_LEVERAGE),
+        "bybit_margin_type": s.get("bybit_margin_type", "ISOLATED"),
+    }
+
+
+@app.get("/api/bybit/trade-locks")
+async def get_trade_locks(_: dict = Depends(get_current_user)):
+    """
+    Return currently locked symbols (instruments with an active open trade).
+    Used by the frontend to show lock status on signal cards.
+    """
+    return _trade_tracker.all_locks()
+
+
+@app.delete("/api/bybit/trade-locks/{symbol}")
+async def release_trade_lock(symbol: str, _: dict = Depends(get_current_user)):
+    """Manually release a trade lock for a symbol (e.g. after manual close)."""
+    if symbol not in BYBIT_SYMBOLS:
+        raise HTTPException(404, f"Symbol '{symbol}' not tracked")
+    _trade_tracker.unlock(symbol)
+    return {"unlocked": True, "symbol": symbol}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 #  Bybit market data routes  (no credentials — all public data)
 # ─────────────────────────────────────────────────────────────────────────────
 
 @app.get("/api/bybit/market")
 async def bybit_market(_: dict = Depends(get_current_user)):
     """
-    SMC state + 24 h stats for all 15 Bybit symbols.
-    Mirrors GET /api/markets.  All data is from the public-endpoint cache.
-
-    Response per symbol:
-        symbol, price, bias, confidence, layer2, layer3,
-        high24h, low24h, volume24h (USDT), change24h (percent)
-
-    Sorted by 24 h USDT volume descending so the most liquid pairs appear first.
+    SMC state + 24 h stats for all 15 Bybit Linear symbols.
+    Mirrors GET /api/markets.  All data from the public-endpoint cache.
+    Sorted by 24 h USDT turnover descending — highest-liquidity pairs first.
     """
     result = []
     for sym in BYBIT_SYMBOLS:
@@ -1320,16 +1773,16 @@ async def bybit_candles(
     _: dict = Depends(get_current_user),
 ):
     """
-    Return cached Bybit candles.  interval: "1"|"5"|"15"|"60".
-    If the interval isn't cached yet (e.g. first request for M1), a live
-    fetch is performed so the chart is never blank.
+    Return cached Bybit candles.  interval: "1"|"5"|"15"|"60"
+
+    Cold-cache live fetch if the interval hasn't been seeded yet.
     """
     if symbol not in _bybit_candle_cache:
         raise HTTPException(404, f"Symbol '{symbol}' not tracked")
     if interval not in BYBIT_INTERVALS:
         raise HTTPException(400, f"interval must be one of {BYBIT_INTERVALS}")
 
-    n       = max(1, min(limit, 200))
+    n       = max(1, min(limit, 500))
     candles = _bybit_candle_cache[symbol].get(interval, [])
 
     if not candles:
@@ -1353,10 +1806,6 @@ async def bybit_candles(
 async def bybit_signals(_: dict = Depends(get_current_user)):
     """
     All active Bybit SMC signals across 15 symbols, sorted newest-first.
-    Mirrors GET /api/signals.
-
-    Each signal: symbol, instrument, direction, entry, sl, tp,
-    breakeven, rr (≈3.0), confidence, layer1, layer2, layer3, timestamp.
     """
     all_signals: list[dict] = []
     for s in _bybit_signal_history.values():
@@ -1369,14 +1818,10 @@ async def bybit_signals(_: dict = Depends(get_current_user)):
 # ─────────────────────────────────────────────────────────────────────────────
 
 @app.get("/api/bybit/account")
-async def bybit_account(payload: dict = Depends(get_current_user)):
+async def bybit_account_route(payload: dict = Depends(get_current_user)):
     """
-    Fetch Unified Trading Account wallet balance.
-
-    Credential resolution: personal key → BYBIT_READ_ONLY_KEY env → HTTP 422.
-    Response is Bybit's raw wallet object:
-        accountType, totalEquity, totalMarginBalance,
-        totalAvailableBalance, totalPerpUPL
+    Fetch Bybit Unified Trading Account balance.
+    Returns: accountType, totalEquity, totalAvailable, totalMargin, totalUSDT, coin[]
     """
     clerk_id = payload["sub"]
     creds    = await _get_user_bybit_creds(clerk_id)
@@ -1386,14 +1831,14 @@ async def bybit_account(payload: dict = Depends(get_current_user)):
             "No Bybit credentials configured — add your API key in Profile → Bybit Credentials",
         )
     try:
-        return await bybit_fetch_wallet(*creds)
+        return await bybit_fetch_account(*creds)
     except Exception as exc:
         raise HTTPException(503, f"Bybit account error: {exc}")
 
 
 @app.get("/api/bybit/account/positions")
-async def bybit_positions(payload: dict = Depends(get_current_user)):
-    """Open linear perpetual positions. Returns [] if no positions are open."""
+async def bybit_positions_route(payload: dict = Depends(get_current_user)):
+    """Open Bybit Linear positions. Returns [] when no positions are open."""
     clerk_id = payload["sub"]
     creds    = await _get_user_bybit_creds(clerk_id)
     if not creds:
@@ -1408,11 +1853,11 @@ async def bybit_positions(payload: dict = Depends(get_current_user)):
 
 
 @app.get("/api/bybit/account/history")
-async def bybit_trade_history(
+async def bybit_trade_history_route(
     payload: dict = Depends(get_current_user),
     limit:   int  = 50,
 ):
-    """Recent closed trade executions (fills). limit capped at 100."""
+    """Recent Bybit execution history. limit capped at 100."""
     clerk_id = payload["sub"]
     creds    = await _get_user_bybit_creds(clerk_id)
     if not creds:
@@ -1534,13 +1979,14 @@ async def websocket_endpoint(ws: WebSocket, token: str = ""):
 @app.get("/health")
 async def health():
     return {
-        "status":              "ok",
-        "version":             "2.1.0",
-        "auth":                "clerk",
-        "jwks_keys":           len(_clerk_jwks),
-        "ws_clients":          len(_ws_clients),
-        "oanda_prices_cached": len(_latest_prices),
-        "bybit_prices_cached": sum(1 for p in _bybit_prices.values() if p > 0),
-        "bybit_signals_total": sum(len(v) for v in _bybit_signal_history.values()),
-        "timestamp":           int(time.time()),
+        "status":               "ok",
+        "version":              "2.4.0",
+        "auth":                 "clerk",
+        "jwks_keys":            len(_clerk_jwks),
+        "ws_clients":           len(_ws_clients),
+        "oanda_prices_cached":  len(_latest_prices),
+        "bybit_prices_cached":  sum(1 for p in _bybit_prices.values() if p > 0),
+        "bybit_signals_total":  sum(len(v) for v in _bybit_signal_history.values()),
+        "bybit_trade_locks":    len(_trade_tracker.all_locks()),
+        "timestamp":            int(time.time()),
     }
