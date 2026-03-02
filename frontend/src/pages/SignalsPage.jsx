@@ -9,10 +9,10 @@
  *   The backend's TradeTracker ensures only the FIRST signal per instrument
  *   appears until the trade is closed or the 2-hour TTL expires.
  *   The frontend additionally de-dupes by (instrument + direction + timestamp
- *   rounded to 5-minute bucket) so rapid re-fetches don't show duplicates.
+ *   rounded to 5-minute bucket) so rapid re-fetches don't show duplicates
  *
  * OneSignal push notifications are initialised automatically on login (in
- * App.jsx) — no toggle shown here.
+ * App.jsx) — no toggle shown here
  */
 import { useState, useEffect, useCallback, useRef } from "react";
 import { motion, AnimatePresence }                   from "framer-motion";
