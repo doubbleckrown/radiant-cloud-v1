@@ -43,6 +43,14 @@ const C = {
 const FONT_UI   = "'Inter', sans-serif";
 const FONT_MONO = "'JetBrains Mono', monospace";
 
+// Inject close-button spin animation once
+if (typeof document !== "undefined" && !document.getElementById("acct-spin-css")) {
+  const s = document.createElement("style");
+  s.id = "acct-spin-css";
+  s.textContent = "@keyframes spin { to { transform: rotate(360deg); } }";
+  document.head.appendChild(s);
+}
+
 const TABS = ["Summary", "Open Trades", "History"];
 
 // ── Bybit API headers ─────────────────────────────────────────────────────────
@@ -194,7 +202,32 @@ export default function AccountPage() {
     }
   }, []);
 
-  // ── Auto-trade toggle (Oanda only) ────────────────────────────────────────
+  // ── Trade close (manual) ─────────────────────────────────────────────────
+  const [closing,    setClosing]    = useState({});  // {tradeId: true}
+  const [closeError, setCloseError] = useState(null);
+
+  const closeTrade = useCallback(async ({ tradeId, symbol, side, qty }) => {
+    const key = tradeId ?? symbol;
+    setClosing(p => ({ ...p, [key]: true }));
+    setCloseError(null);
+    try {
+      if (isCrypto) {
+        await api.post("/trade/close", { broker: "bybit", symbol, side, qty: String(qty) });
+        // Optimistically remove from local state
+        setBybitPositions(ps => ps.filter(p => p.symbol !== symbol));
+      } else {
+        await api.post("/trade/close", { broker: "oanda", trade_id: String(tradeId) });
+        setTrades(ts => ts.filter(t => String(t.id) !== String(tradeId)));
+      }
+    } catch (e) {
+      const msg = e?.response?.data?.detail ?? "Close failed — try again";
+      setCloseError(msg);
+      setTimeout(() => setCloseError(null), 4000);
+    } finally {
+      setClosing(p => { const n = { ...p }; delete n[key]; return n; });
+    }
+  }, [isCrypto]);
+
 
 
   // ── Active state (routed by mode) ─────────────────────────────────────────
@@ -333,6 +366,9 @@ export default function AccountPage() {
                 onRetry={retryFns["Open Trades"]}
                 isCrypto={isCrypto}
                 accent={accent}
+                closing={closing}
+                closeError={closeError}
+                onClose={closeTrade}
               />
             )}
             {activeTab === "History" && (
@@ -630,7 +666,7 @@ function SummaryTab({ account, loading, error, onRetry, isCrypto, accent, accent
 // ─────────────────────────────────────────────────────────────────────────────
 //  Open Trades tab — Oanda or Bybit positions, selected by isCrypto
 // ─────────────────────────────────────────────────────────────────────────────
-function OpenTradesTab({ trades, loading, error, onRetry, isCrypto, accent }) {
+function OpenTradesTab({ trades, loading, error, onRetry, isCrypto, accent, closing = {}, closeError, onClose }) {
   const [openId, setOpenId] = useState(null);
 
   if (loading) return <TabLoading />;
@@ -775,9 +811,29 @@ function OpenTradesTab({ trades, loading, error, onRetry, isCrypto, accent }) {
                 ))}
               </div>
 
-              <p style={{ color: C.sub, fontSize: "0.62rem", marginTop: 10, fontFamily: FONT_UI }}>
-                Opened {norm.openTs}
-              </p>
+              <div style={{
+                display: "flex", alignItems: "center",
+                justifyContent: "space-between", marginTop: 10,
+              }}>
+                <p style={{ color: C.sub, fontSize: "0.62rem", margin: 0, fontFamily: FONT_UI }}>
+                  Opened {norm.openTs}
+                </p>
+                <CloseTradeButton
+                  isLoading={closing[norm.id] || closing[norm.symbol]}
+                  onClose={() => onClose(isCrypto
+                    ? { symbol: t.symbol, side: t.side, qty: t.size ?? t.qty ?? "0" }
+                    : { tradeId: t.id }
+                  )}
+                />
+              </div>
+              {closeError && (
+                <p style={{
+                  color: C.red, fontSize: "0.62rem", margin: "4px 0 0",
+                  fontFamily: FONT_UI,
+                }}>
+                  ⚠ {closeError}
+                </p>
+              )}
             </motion.div>
 
             {/* Accordion: Trade Detail Card */}
@@ -798,6 +854,54 @@ function OpenTradesTab({ trades, loading, error, onRetry, isCrypto, accent }) {
         );
       })}
     </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  CloseTradeButton — red close button with loading spinner
+// ─────────────────────────────────────────────────────────────────────────────
+function CloseTradeButton({ onClose, isLoading }) {
+  return (
+    <motion.button
+      whileTap={{ scale: 0.96 }}
+      disabled={isLoading}
+      onClick={e => { e.stopPropagation(); onClose(); }}
+      style={{
+        display:       "flex",
+        alignItems:    "center",
+        gap:           5,
+        padding:       "5px 12px",
+        borderRadius:  8,
+        border:        "1px solid rgba(255,58,58,0.4)",
+        background:    isLoading ? "rgba(255,58,58,0.05)" : "rgba(255,58,58,0.1)",
+        color:         isLoading ? "#666" : "#FF3A3A",
+        fontSize:      "0.65rem",
+        fontWeight:    700,
+        fontFamily:    "'Inter', sans-serif",
+        letterSpacing: "0.06em",
+        cursor:        isLoading ? "not-allowed" : "pointer",
+        transition:    "all 0.15s",
+        whiteSpace:    "nowrap",
+        boxShadow:     isLoading ? "none" : "0 0 10px rgba(255,58,58,0.15)",
+      }}
+    >
+      {isLoading ? (
+        <>
+          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
+            style={{ animation: "spin 0.8s linear infinite" }}>
+            <path d="M12 2a10 10 0 0 1 0 20"/>
+          </svg>
+          CLOSING…
+        </>
+      ) : (
+        <>
+          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+            <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+          </svg>
+          CLOSE TRADE
+        </>
+      )}
+    </motion.button>
   );
 }
 

@@ -32,7 +32,7 @@ import ProfilePage   from "./pages/ProfilePage";
 import TabBar        from "./components/layout/TabBar";
 import { useAuthStore } from "./store/authStore";
 import { useTheme }     from "./hooks/useTheme";
-import { initOneSignal } from "./services/pushNotifications";
+import { usePushNotifications } from "./hooks/usePushNotifications";
 
 const FONT_UI   = "'Inter', sans-serif";
 const FONT_MONO = "'JetBrains Mono', monospace";
@@ -91,9 +91,11 @@ export default function App() {
     accent, accentHdr, accentDim, accentBdr, scanline, isCrypto, appMode,
   } = useTheme();
 
-  useEffect(() => {
-    initOneSignal().catch(() => {});
-  }, []);
+  // ── Push notifications — fully automatic background registration ────────
+  // usePushNotifications handles SW registration, OS permission prompt,
+  // player ID registration, and background delivery automatically.
+  // No user-gesture "Enable Alerts" button needed.
+  usePushNotifications();
 
   // ── Cinematic Dimension Shift: show overlay when mode changes ─────────────
   useEffect(() => {

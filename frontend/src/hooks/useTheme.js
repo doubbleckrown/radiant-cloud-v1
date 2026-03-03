@@ -2,7 +2,7 @@
  * useTheme — derive all accent-colour tokens from the current appMode.
  *
  * FOREX  → Radiant Green  #00FF41
- * CRYPTO → MEXC Teal      #00B4C8
+ * CRYPTO → Bybit Orange   #FF9900
  *
  * Every page/component that needs dynamic colours calls this hook instead
  * of using hardcoded constants.
@@ -24,15 +24,15 @@ const FOREX_TOKENS = {
 };
 
 const CRYPTO_TOKENS = {
-  accent:      "#00B4C8",
-  accentDim:   "rgba(0,180,200,0.12)",
-  accentBdr:   "rgba(0,180,200,0.25)",
-  accentFaint: "rgba(0,180,200,0.08)",
-  accentGlow:  "rgba(0,180,200,0.07)",
-  accentHdr:   "rgba(0,180,200,0.08)",
-  scanline:    "rgba(0,180,200,0.06)",
+  accent:      "#FF9900",
+  accentDim:   "rgba(255,153,0,0.12)",
+  accentBdr:   "rgba(255,153,0,0.25)",
+  accentFaint: "rgba(255,153,0,0.08)",
+  accentGlow:  "rgba(255,153,0,0.07)",
+  accentHdr:   "rgba(255,153,0,0.08)",
+  scanline:    "rgba(255,153,0,0.06)",
   modeName:    "CRYPTO",
-  modeLabel:   "MEXC",
+  modeLabel:   "Bybit",
   modeIcon:    "₿",
 };
 

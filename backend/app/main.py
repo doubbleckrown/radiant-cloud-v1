@@ -13,7 +13,7 @@ Elite 35 Instrument List:
   BYBIT (19): 14 Blue-Chips + 5 Meme Coins (PEPE, BONK, FARTCOIN, XP, WLFI)
 
 Engine design:
-  OANDA  — ema_period=200, rr_ratio=2.0, H1 primary timeframe
+  OANDA  — ema_period=200, rr_ratio=3.0, H1 primary timeframe
   BYBIT  — ema_period=50,  rr_ratio=3.0, H1 primary timeframe
 """
 
@@ -136,7 +136,10 @@ _latest_prices:  dict[str, float]       = {}
 _ws_clients:     set[WebSocket]         = set()
 _signal_history: dict[str, list[dict]]  = {ins: [] for ins in INSTRUMENTS}
 _engines:        dict[str, SMCConfluenceEngine] = {
-    ins: SMCConfluenceEngine(ins) for ins in INSTRUMENTS
+    # ema_period=200 — institutional-grade trend filter for Forex/Metals/Indices
+    # rr_ratio=3.0   — 1:3 risk-reward matches Bybit spec (TP = entry ± 3× SL distance)
+    ins: SMCConfluenceEngine(ins, ema_period=200, rr_ratio=3.0)
+    for ins in INSTRUMENTS
 }
 _push_subscriptions: set[str] = set()
 
@@ -370,21 +373,99 @@ async def fetch_trade_history(api_key: str, account_id: str, count: int = 50) ->
     return resp.json().get("trades", [])
 
 
+# ── Oanda instrument precision — Metals require specific unit handling ─────────
+# XAU/XAG/XPT: Oanda accepts units in troy-ounce units (integers only, min 1)
+# Indices (NAS100/SPX500/US30): units in integer lots
+# Forex: integer units (full currency units), min 1
+_OANDA_MIN_UNITS: dict[str, int] = {
+    "XAU_USD": 1, "XAG_USD": 1, "XPT_USD": 1,   # metals — minimum 1 oz
+    "NAS100_USD": 1, "SPX500_USD": 1, "US30_USD": 1,
+}
+# Metals & indices: SL/TP price format (2-4 decimal places, not 5)
+_OANDA_SL_DECIMALS: dict[str, int] = {
+    "XAU_USD": 3, "XAG_USD": 3, "XPT_USD": 3,
+    "NAS100_USD": 1, "SPX500_USD": 1, "US30_USD": 1,
+}
+
+def _oanda_compute_units(instrument: str, risk_usd: float, sl_dist: float, is_long: bool) -> int:
+    """
+    Compute Oanda unit size safely for any instrument type.
+
+    Forex  : units = risk_usd / sl_dist  (pip value ≈ $1 per 1 unit for USD-quote pairs)
+    Metals : units = risk_usd / sl_dist  (same formula — sl_dist is in $/oz for XAU)
+    Indices: units = risk_usd / (sl_dist * index_point_value) — point value ≈ $1
+
+    Always returns a non-zero integer.  LONG → positive, SHORT → negative.
+    """
+    if sl_dist <= 0:
+        return 0
+    raw = risk_usd / sl_dist
+    # For very small calculated sizes (e.g. XAU with tight SL), floor to minimum 1
+    minimum = _OANDA_MIN_UNITS.get(instrument, 1)
+    units   = max(int(raw), minimum)
+    return units if is_long else -units
+
+
 async def place_market_order(
     api_key: str, account_id: str,
     instrument: str, units: int, stop_loss: float, take_profit: float,
 ) -> dict:
+    sl_dec = _OANDA_SL_DECIMALS.get(instrument, 5)
     url  = f"{OANDA_BASE}/v3/accounts/{account_id}/orders"
     body = {"order": {
         "type": "MARKET", "instrument": instrument, "units": str(units),
-        "stopLossOnFill":   {"price": f"{stop_loss:.5f}"},
-        "takeProfitOnFill": {"price": f"{take_profit:.5f}"},
+        "stopLossOnFill":   {"price": f"{stop_loss:.{sl_dec}f}"},
+        "takeProfitOnFill": {"price": f"{take_profit:.{sl_dec}f}"},
         "timeInForce": "FOK",
     }}
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(url, headers=_oanda_headers_for(api_key), json=body)
         resp.raise_for_status()
     return resp.json()
+
+
+async def close_oanda_trade(api_key: str, account_id: str, trade_id: str) -> dict:
+    """Close a specific Oanda trade by ID using PUT /v3/accounts/{id}/trades/{id}/close."""
+    url = f"{OANDA_BASE}/v3/accounts/{account_id}/trades/{trade_id}/close"
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.put(url, headers=_oanda_headers_for(api_key), json={"units": "ALL"})
+        resp.raise_for_status()
+    return resp.json()
+
+
+async def close_bybit_position(
+    api_key: str, api_secret: str, symbol: str, side: str, qty: str,
+) -> dict:
+    """
+    Close a Bybit Linear position by placing a market order on the opposite side.
+    side: current position side — "Buy" → close with "Sell", vice versa.
+    qty:  current position size as string.
+    """
+    close_side = "Sell" if side == "Buy" else "Buy"
+    body = {
+        "category":    "linear",
+        "symbol":      symbol,
+        "side":        close_side,
+        "orderType":   "Market",
+        "qty":         qty,
+        "timeInForce": "IOC",
+        "positionIdx": 0,
+        "reduceOnly":  True,
+    }
+    _, headers = _bybit_sign_post(api_key, api_secret, body)
+    async with httpx.AsyncClient(timeout=20) as client:
+        resp = await client.post(
+            f"{BYBIT_BASE}/v5/order/create",
+            headers=headers, json=body,
+        )
+        resp.raise_for_status()
+    data = resp.json()
+    if data.get("retCode", -1) != 0:
+        raise RuntimeError(f"Bybit close error {data.get('retCode')}: {data.get('retMsg')}")
+    logger.info("✅ Bybit position closed: %s %s qty=%s", symbol, close_side, qty)
+    return data
+
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1016,20 +1097,45 @@ async def broadcast(message: dict) -> None:
 
 
 async def _send_onesignal_push(title: str, body: str, data: dict) -> None:
+    """
+    Send a push notification via OneSignal REST API.
+
+    Triggered exclusively from the BACKEND (signal loops) so notifications
+    fire even when the phone screen is off / app is backgrounded.
+
+    Sound:   ios_sound='ding.wav', android_sound='ding' — place ding.wav in
+             the iOS app bundle and ding.mp3 in res/raw for Android.
+             Falls back to device default if the file is absent.
+    Stacking: android_group + thread_id let multiple signals stack under one
+             expandable notification rather than flooding the shade.
+    """
     if not ONESIGNAL_APP_ID or not ONESIGNAL_REST_KEY:
         return
     if not _push_subscriptions:
         return
+    instrument_key = data.get("instrument", data.get("symbol", "fx-radiant"))
     payload = {
         "app_id":                   ONESIGNAL_APP_ID,
         "include_subscription_ids": list(_push_subscriptions),
         "headings":                 {"en": title},
         "contents":                 {"en": body},
         "data":                     data,
+        # ── Sound ──────────────────────────────────────────────────────────
+        "ios_sound":                "ding.wav",
+        "android_sound":            "ding",
+        # ── Vibration ──────────────────────────────────────────────────────
         "android_vibrate":          True,
-        "ios_sound":                "default",
-        "android_sound":            "default",
-        "collapse_id":              data.get("instrument", data.get("symbol", "fx-radiant")),
+        # ── Stacking (group signals under one expandable notification) ─────
+        "android_group":            "fx-radiant-signals",
+        "android_group_message":    {"en": "$[notif_count] new FX Radiant signals"},
+        "thread_id":                "fx-radiant-signals",   # iOS 12+ grouping
+        "summary_arg":              "FX Radiant Signals",
+        # ── Collapse identical instruments (replace, don't stack per-pair) ─
+        "collapse_id":              instrument_key,
+        # ── Background delivery ────────────────────────────────────────────
+        # content_available=1 wakes iOS apps in background for silent pushes
+        "content_available":        True,
+        "priority":                 10,   # high delivery priority
     }
     try:
         async with httpx.AsyncClient(timeout=10) as client:
@@ -1088,10 +1194,8 @@ async def _oanda_auto_execute(ins: str, sig_dict: dict, signal) -> None:
             logger.warning("AutoExec OANDA: SL=entry for %s — skip", ins)
             return
 
-        # Units = risk_usd / sl_pips
-        # For Forex: sl_dist is in price. For USD quote pairs, pip value ≈ 1 USD per 1 unit.
-        units_raw = int(risk_usd / sl_dist)
-        units     = units_raw if signal.direction.value == "LONG" else -units_raw
+        is_long = signal.direction.value == "LONG"
+        units   = _oanda_compute_units(ins, risk_usd, sl_dist, is_long)
         if abs(units) < 1:
             logger.warning("AutoExec OANDA: computed units<1 for %s — skip", ins)
             return
@@ -1723,8 +1827,83 @@ async def create_order(body: OrderRequest, payload: dict = Depends(get_current_u
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  WebSocket — real-time Oanda feed
+#  Manual Trade Close  — Oanda + Bybit
 # ─────────────────────────────────────────────────────────────────────────────
+
+class TradeCloseRequest(BaseModel):
+    # For Oanda
+    trade_id:   Optional[str] = None   # Oanda trade ID (string)
+    # For Bybit
+    symbol:     Optional[str] = None   # e.g. "BTCUSDT"
+    side:       Optional[str] = None   # current position side: "Buy" | "Sell"
+    qty:        Optional[str] = None   # position size as string, e.g. "0.001"
+    # Routing
+    broker:     str = "oanda"          # "oanda" | "bybit"
+
+
+@app.post("/api/trade/close")
+async def close_trade(body: TradeCloseRequest, payload: dict = Depends(get_current_user)):
+    """
+    Manually close a trade/position.
+
+    Oanda: PUT /v3/accounts/{id}/trades/{trade_id}/close  (units=ALL)
+    Bybit: POST /v5/order/create  (reduceOnly=True, opposite side)
+
+    On success: releases TradeTracker lock for the instrument/symbol.
+    Returns 400/500 on failure — never silently swallows errors.
+    """
+    broker = (body.broker or "oanda").lower()
+
+    if broker == "bybit":
+        if not body.symbol or not body.side or not body.qty:
+            raise HTTPException(422, "symbol, side, and qty are required for Bybit close")
+        creds = _get_bybit_creds()
+        if not creds:
+            raise HTTPException(503, "BYBIT_API_KEY/SECRET not configured in .env")
+        api_key, api_secret = creds
+        try:
+            result = await close_bybit_position(api_key, api_secret, body.symbol, body.side, body.qty)
+            # Release trade lock so the engine can find new setups
+            _trade_tracker.unlock(body.symbol)
+            logger.info("🔓 Manual close: Bybit %s — lock released", body.symbol)
+            return {
+                "ok":     True,
+                "broker": "bybit",
+                "symbol": body.symbol,
+                "result": result.get("result", {}),
+            }
+        except Exception as exc:
+            logger.error("Manual close BYBIT %s failed: %s", body.symbol, exc)
+            raise HTTPException(503, f"Bybit close failed: {exc}")
+
+    else:  # oanda
+        if not body.trade_id:
+            raise HTTPException(422, "trade_id is required for Oanda close")
+        creds = _get_oanda_creds()
+        if not creds:
+            raise HTTPException(503, "OANDA_API_KEY/ACCOUNT_ID not configured in .env")
+        api_key, account_id = creds
+        try:
+            result     = await close_oanda_trade(api_key, account_id, body.trade_id)
+            fill_tx    = result.get("orderFillTransaction") or {}
+            instrument = fill_tx.get("instrument", "")
+            # Release trade lock for this instrument
+            if instrument:
+                _trade_tracker.unlock(instrument)
+                logger.info("🔓 Manual close: Oanda %s — lock released", instrument)
+            return {
+                "ok":         True,
+                "broker":     "oanda",
+                "trade_id":   body.trade_id,
+                "instrument": instrument,
+                "realized_pl": fill_tx.get("pl", "0"),
+            }
+        except Exception as exc:
+            logger.error("Manual close OANDA %s failed: %s", body.trade_id, exc)
+            raise HTTPException(503, f"Oanda close failed: {exc}")
+
+
+
 
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket, token: str = ""):

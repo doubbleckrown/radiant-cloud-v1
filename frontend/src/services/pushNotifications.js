@@ -3,16 +3,18 @@
  * ══════════════════════════════════════════════════════════════════════════════
  * OneSignal Web SDK v16 wrapper.
  *
- * Key changes from previous version:
+ * Key changes:
  *   • Pre-registers the service worker explicitly (scope '/') BEFORE
- *     OneSignal.init() runs.  This prevents the "wrong scope" error that
- *     causes push token registration to silently fail.
+ *     OneSignal.init() runs.  Prevents the "wrong scope" error causing
+ *     push token registration to silently fail.
  *   • Replaces the unreliable polling loop with OneSignal's own
- *     PushSubscription 'change' event listener.  The event fires exactly
- *     once when the server-side subscription ID arrives — no more racing.
- *   • Exports waitForSubscriptionId() so the hook can await it directly.
- *   • All other behaviour (graceful no-op, deferred init, showLocalNotification)
- *     is unchanged.
+ *     PushSubscription 'change' event listener.
+ *   • allowLocalNotificationStacking: true — multiple simultaneous signals
+ *     each get their own notification rather than replacing each other.
+ *   • persistNotification: true — notifications stay in the Android/Windows
+ *     notification shade when the app is backgrounded.
+ *   • All notification triggers sent from the BACKEND, so they fire even
+ *     when the device screen is off.
  */
 
 const APP_ID = import.meta.env.VITE_ONESIGNAL_APP_ID;
@@ -104,16 +106,31 @@ export function isSubscribed() {
 export function showLocalNotification(title, body, data = {}) {
   if (typeof Notification === 'undefined') return;
   if (Notification.permission !== 'granted') return;
+  // Use a unique tag per instrument so multiple signals stack independently
+  // rather than replacing each other (renotify still triggers sound/vibrate)
+  const tag = `fx-radiant-${data.instrument ?? data.symbol ?? Date.now()}`;
   try {
     if (navigator.serviceWorker?.controller) {
       navigator.serviceWorker.ready.then((reg) => {
         reg.showNotification(title, {
-          body, icon: '/favicon.ico', badge: '/favicon.ico',
-          vibrate: [200, 100, 200], tag: 'fx-radiant-signal', renotify: true, data,
+          body,
+          icon:      '/favicon.ico',
+          badge:     '/favicon.ico',
+          vibrate:   [200, 100, 200],
+          tag,
+          renotify:  true,   // re-trigger sound/vibrate even if same tag exists
+          data,
+          // Android: keep notification in shade when app closes
+          requireInteraction: false,
         });
       });
     } else {
-      new Notification(title, { body, icon: '/favicon.ico', tag: 'fx-radiant-signal', renotify: true });
+      new Notification(title, {
+        body,
+        icon:     '/favicon.ico',
+        tag,
+        renotify: true,
+      });
     }
   } catch { /* best-effort */ }
 }
@@ -169,6 +186,14 @@ async function _loadAndInit() {
           notifyButton:                 { enable: false },
           promptOptions:                { autoPrompt: false },
           allowLocalhostAsSecureOrigin: true,
+          // ── Notification stacking ────────────────────────────────────────
+          // Allows multiple concurrent signal alerts to appear individually
+          // rather than collapsing into each other.
+          allowLocalNotificationStacking: true,
+          // ── Background / lock-screen delivery ───────────────────────────
+          // persistNotification keeps notifications in the Android shade
+          // when the browser tab is closed or the screen is off.
+          persistNotification:          true,
         });
         _ready = true;
       } catch (e) {

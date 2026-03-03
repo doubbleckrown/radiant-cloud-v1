@@ -376,14 +376,40 @@ export default function MarketsPage() {
 
 // ── ConfBadge ─────────────────────────────────────────────────────────────────
 function ConfBadge({ conf, bias, accent }) {
-  const color = conf >= 100 ? accent : conf >= 80 ? C.amber : C.sub;
-  const biasLabel = bias === "LONG" ? "BULLISH" : bias === "SHORT" ? "BEARISH" : bias === "NEUTRAL" ? "" : bias;
+  const isBullish  = bias === "LONG"  || bias === "BULLISH";
+  const isBearish  = bias === "SHORT" || bias === "BEARISH";
+  const biasLabel  = isBullish ? "BULLISH" : isBearish ? "BEARISH" : "";
+
+  // Spec-exact neon colors for directional labels
+  const bullColor  = "#4ADE80";
+  const bearColor  = "#F87171";
+
+  // Badge confidence color — accent at 100%, amber at ≥80%, sub otherwise
+  const confColor  = conf >= 100 ? accent : conf >= 80 ? C.amber : C.sub;
+
+  // Directional labels use spec neon; neutral uses confColor
+  const labelColor = isBullish ? bullColor : isBearish ? bearColor : confColor;
+  const glowColor  = isBullish
+    ? "rgba(74, 222, 128, 0.9)"
+    : isBearish
+    ? "rgba(248, 113, 113, 0.9)"
+    : null;
+
   return (
     <span style={{
-      fontSize: "0.6rem", fontWeight: 700, padding: "2px 7px", borderRadius: 5,
-      background: `${color}12`, border: `1px solid ${color}28`,
-      color, fontFamily: FONT_MONO, letterSpacing: "0.06em",
-      filter: conf >= 100 ? `drop-shadow(0 0 6px ${color}cc)` : "none",
+      fontSize:      "0.6rem",
+      fontWeight:    700,
+      padding:       "2px 7px",
+      borderRadius:  5,
+      background:    `${labelColor}12`,
+      border:        `1px solid ${labelColor}30`,
+      color:         labelColor,
+      fontFamily:    FONT_MONO,
+      letterSpacing: "0.06em",
+      textShadow:    glowColor ? `0 0 12px ${glowColor}` : "none",
+      filter:        (conf >= 100 || isBullish || isBearish)
+                       ? `drop-shadow(0 0 6px ${labelColor}99)`
+                       : "none",
     }}>
       {conf}% {biasLabel}
     </span>
