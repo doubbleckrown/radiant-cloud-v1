@@ -791,7 +791,7 @@ async def _bybit_auto_execute(sym: str, sig_dict: dict, signal) -> None:
 
         leverage    = BYBIT_DEFAULT_LEVERAGE
         margin_type = BYBIT_MARGIN_TYPE
-        risk_pct    = float(os.getenv("BOT_RISK_PCT", "1.0")) / 100.0
+        risk_pct    = float(os.getenv("BOT_RISK_PCT", "2.0")) / 100.0
         risk_usd    = equity * risk_pct
 
         entry   = signal.entry_price
