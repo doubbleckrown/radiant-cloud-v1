@@ -1,18 +1,20 @@
 """
-FX Radiant — FastAPI Backend  v2.3
-===================================
-• Clerk JWT Authentication (RS256 JWKS — no manual login)
+FX Radiant — FastAPI Backend  v3.0  (Private Bot Mode)
+=======================================================
+• Clerk JWT Authentication (RS256 JWKS)
 • Oanda v20 WebSocket price streaming + candle polling
-• Bybit V5 Linear (Perpetuals) candle polling + ticker refresh  (crypto engine)
-• SMC Confluence Engine — fires signals at 100 % confluence
-• Dynamic SL / Breakeven risk engine
-• Multi-user: per-user credentials stored in Supabase
+• Bybit V5 Linear (Perpetuals) candle polling + ticker refresh
+• SMC Confluence Engine — auto-executes at EXACTLY 100% confluence
+• TradeTracker — one-position-per-instrument deduplication (2-h TTL)
+• Env-only credentials — no Supabase, no per-user key storage
+
+Elite 35 Instrument List:
+  OANDA (16): 10 Forex + 3 Metals + 3 Indices
+  BYBIT (19): 14 Blue-Chips + 5 Meme Coins (PEPE, BONK, FARTCOIN, XP, WLFI)
 
 Engine design:
-  OANDA  — ema_period=200, rr_ratio=2.0, H1  primary timeframe
-  BYBIT  — ema_period=50,  rr_ratio=3.0, H1  primary timeframe
-  (Bybit kline capped at 200 per request; 50-EMA gives meaningful signals.
-   rr_ratio=3.0 matches the 1:3 RR product spec.)
+  OANDA  — ema_period=200, rr_ratio=2.0, H1 primary timeframe
+  BYBIT  — ema_period=50,  rr_ratio=3.0, H1 primary timeframe
 """
 
 from __future__ import annotations
@@ -67,8 +69,11 @@ CLERK_JWKS_URL = os.getenv(
 ONESIGNAL_APP_ID   = os.getenv("ONESIGNAL_APP_ID",  "")
 ONESIGNAL_REST_KEY = os.getenv("ONESIGNAL_REST_KEY", "")
 
-SUPABASE_URL              = os.getenv("SUPABASE_URL", "")
-SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
+# ── Supabase — DISABLED in Private Bot Mode ───────────────────────────────
+# SUPABASE_URL              = os.getenv("SUPABASE_URL", "")
+# SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
+SUPABASE_URL              = ""   # disabled
+SUPABASE_SERVICE_ROLE_KEY = ""   # disabled
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Config — Bybit V5 Linear (Perpetuals)
@@ -76,21 +81,22 @@ SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
 
 BYBIT_BASE = "https://api.bybit.com"
 
-# Optional global read-only Bybit credentials.
-# Public market endpoints (kline, tickers) need NO key.
-# These env vars are only used as fallback for account endpoints when a user
-# hasn't saved personal credentials in their Profile.
-BYBIT_READ_ONLY_KEY    = os.getenv("BYBIT_READ_ONLY_KEY",    "")
-BYBIT_READ_ONLY_SECRET = os.getenv("BYBIT_READ_ONLY_SECRET", "")
+# ── Bybit execution credentials (private bot — env only) ─────────────────────
+BYBIT_API_KEY    = os.getenv("BYBIT_API_KEY",    "")
+BYBIT_API_SECRET = os.getenv("BYBIT_API_SECRET", "")
 
-# Default leverage for Bybit auto-execution
+# Default leverage for all Bybit auto-execution orders
 BYBIT_DEFAULT_LEVERAGE = int(os.getenv("BYBIT_DEFAULT_LEVERAGE", "20"))
+BYBIT_MARGIN_TYPE      = os.getenv("BYBIT_MARGIN_TYPE", "ISOLATED")   # ISOLATED | CROSS
 
-# 15 high-volume Bybit Linear (USDT perpetual) symbols
+# ── Elite 19: 14 blue-chips + 5 meme coins ────────────────────────────────────
 BYBIT_SYMBOLS = [
-    "BTCUSDT",  "ETHUSDT",  "SOLUSDT",  "XRPUSDT",  "BNBUSDT",
-    "DOGEUSDT", "AVAXUSDT", "ADAUSDT",  "DOTUSDT",  "MATICUSDT",
-    "LINKUSDT", "LTCUSDT",  "NEARUSDT", "ATOMUSDT", "UNIUSDT",
+    # Blue-chip perpetuals
+    "BTCUSDT",   "ETHUSDT",   "SOLUSDT",  "XRPUSDT",  "BNBUSDT",
+    "DOGEUSDT",  "AVAXUSDT",  "ADAUSDT",  "DOTUSDT",  "LINKUSDT",
+    "LTCUSDT",   "NEARUSDT",  "ATOMUSDT", "UNIUSDT",
+    # Meme coins
+    "1000PEPEUSDT", "1000BONKUSDT", "FARTCOINUSDT", "XPLUSDT", "WLFIUSDT",
 ]
 
 # Bybit V5 interval strings: "60"=H1, "15"=M15, "5"=M5, "1"=M1
@@ -100,16 +106,15 @@ BYBIT_INTERVALS = ["60", "15", "5", "1"]
 #  Oanda instruments + granularities
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ── Elite 16: 10 Forex + 3 Metals + 3 Indices ─────────────────────────────────
 INSTRUMENTS = [
-    # Forex majors
-    "EUR_USD", "GBP_USD", "USD_JPY", "AUD_USD",
-    "NZD_USD", "USD_CAD", "USD_CHF",
-    # Metals
-    "XAU_USD",
-    # Indices  (corrected symbols — GER30_EUR/J225_USD/BTC_USD are NOT valid on Oanda v20)
-    "NAS100_USD", "US30_USD", "SPX500_USD",
-    "DE30_EUR",   "UK100_GBP", "JP225_USD",
-    # HK33_HKD removed — practice accounts typically reject it
+    # Forex (10)
+    "EUR_USD", "GBP_USD", "USD_JPY", "AUD_USD", "NZD_USD",
+    "USD_CAD", "EUR_GBP", "GBP_JPY", "EUR_JPY", "AUD_CAD",
+    # Metals (3)
+    "XAU_USD", "XAG_USD", "XPT_USD",
+    # Indices (3)
+    "NAS100_USD", "SPX500_USD", "US30_USD",
 ]
 GRANULARITIES = ["M1", "M5", "M15", "H1"]
 
@@ -122,22 +127,7 @@ logging.basicConfig(level=logging.INFO)
 # ─────────────────────────────────────────────────────────────────────────────
 
 _clerk_jwks:    dict[str, Any]  = {}
-_user_settings: dict[str, dict] = {}
-
-def _settings(clerk_id: str) -> dict:
-    return _user_settings.setdefault(clerk_id, {
-        # Oanda
-        "auto_trade_enabled":  False,
-        "risk_pct":            1.0,
-        "oanda_key_hint":      "",
-        "oanda_account_id":    "",
-        # Bybit
-        "bybit_key_hint":      "",
-        "bybit_secret_hint":   "",
-        "bybit_auto_trade":    False,      # Bybit-specific auto-execution toggle
-        "bybit_leverage":      20,         # 10–50×, default 20×
-        "bybit_margin_type":   "ISOLATED", # "ISOLATED" | "CROSS"
-    })
+# _user_settings removed — Private Bot Mode uses .env credentials only
 
 _candle_cache:   dict[str, dict[str, list[Candle]]] = {
     ins: {gran: [] for gran in GRANULARITIES} for ins in INSTRUMENTS
@@ -310,52 +300,18 @@ def _oanda_headers_for(api_key: str) -> dict:
     return {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
 
 
-async def _get_user_oanda_creds(clerk_id: str) -> tuple[str, str] | None:
-    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
-        key     = os.environ.get("OANDA_API_KEY",    "").strip()
-        account = os.environ.get("OANDA_ACCOUNT_ID", "").strip()
-        return (key, account) if (key and account) else None
-    try:
-        url     = f"{SUPABASE_URL}/rest/v1/users"
-        headers = {
-            "apikey":        SUPABASE_SERVICE_ROLE_KEY,
-            "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
-            "Content-Type":  "application/json",
-        }
-        params = {"clerk_id": f"eq.{clerk_id}", "select": "oanda_api_key,oanda_account_id"}
-        async with httpx.AsyncClient(timeout=8) as client:
-            resp = await client.get(url, headers=headers, params=params)
-            resp.raise_for_status()
-        rows = resp.json()
-        if rows and rows[0].get("oanda_api_key") and rows[0].get("oanda_account_id"):
-            return rows[0]["oanda_api_key"], rows[0]["oanda_account_id"]
-        key     = os.environ.get("OANDA_API_KEY",    "").strip()
-        account = os.environ.get("OANDA_ACCOUNT_ID", "").strip()
-        return (key, account) if (key and account) else None
-    except Exception as exc:
-        logger.warning("Supabase Oanda cred lookup: %s", exc)
-        key     = os.environ.get("OANDA_API_KEY",    "").strip()
-        account = os.environ.get("OANDA_ACCOUNT_ID", "").strip()
-        return (key, account) if (key and account) else None
+def _get_oanda_creds() -> tuple[str, str] | None:
+    """Return (api_key, account_id) from .env, or None if not configured."""
+    key     = os.environ.get("OANDA_API_KEY",    "").strip()
+    account = os.environ.get("OANDA_ACCOUNT_ID", "").strip()
+    return (key, account) if (key and account) else None
+
+# Alias for backward compat with API routes
+async def _get_user_oanda_creds(_clerk_id: str = "") -> tuple[str, str] | None:
+    return _get_oanda_creds()
 
 
-async def _upsert_user_oanda_creds(clerk_id: str, api_key: str, account_id: str) -> None:
-    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
-        logger.warning("Supabase not configured — Oanda credentials not persisted")
-        return
-    url     = f"{SUPABASE_URL}/rest/v1/users"
-    headers = {
-        "apikey":        SUPABASE_SERVICE_ROLE_KEY,
-        "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
-        "Content-Type":  "application/json",
-        "Prefer":        "resolution=merge-duplicates",
-    }
-    payload = {"clerk_id": clerk_id, "oanda_api_key": api_key, "oanda_account_id": account_id}
-    async with httpx.AsyncClient(timeout=8) as client:
-        resp = await client.post(url, headers=headers, json=payload)
-        resp.raise_for_status()
-    logger.info("Supabase: Oanda creds saved clerk_id=%s…", clerk_id[:8])
-
+# _upsert_user_oanda_creds removed — env-only mode
 
 async def fetch_candles(instrument: str, granularity: str, count: int = 250) -> list[Candle]:
     if not _oanda_credentials_ok():
@@ -421,138 +377,19 @@ async def place_market_order(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Bybit — Supabase credential helpers
-#
-#  Identical resolution chain to the Oanda helpers:
-#    1. Personal key in Supabase for this clerk_id
-#    2. BYBIT_READ_ONLY_KEY / BYBIT_READ_ONLY_SECRET from .env
-#    3. None → caller returns HTTP 422
-#
-#  Note: kline + tickers are fully public — callers that only need
-#  market data must NOT call this (they use the unauthenticated endpoints).
+#  Bybit credential helpers — env-only (Private Bot Mode)
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def _get_user_bybit_creds(clerk_id: str) -> tuple[str, str] | None:
-    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
-        if BYBIT_READ_ONLY_KEY and BYBIT_READ_ONLY_SECRET:
-            return BYBIT_READ_ONLY_KEY, BYBIT_READ_ONLY_SECRET
-        return None
-    try:
-        url     = f"{SUPABASE_URL}/rest/v1/users"
-        headers = {
-            "apikey":        SUPABASE_SERVICE_ROLE_KEY,
-            "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
-            "Content-Type":  "application/json",
-        }
-        params = {
-            "clerk_id": f"eq.{clerk_id}",
-            "select":   "bybit_api_key,bybit_api_secret",
-        }
-        async with httpx.AsyncClient(timeout=8) as client:
-            resp = await client.get(url, headers=headers, params=params)
-            resp.raise_for_status()
-        rows = resp.json()
-        if rows and rows[0].get("bybit_api_key") and rows[0].get("bybit_api_secret"):
-            return rows[0]["bybit_api_key"], rows[0]["bybit_api_secret"]
-        if BYBIT_READ_ONLY_KEY and BYBIT_READ_ONLY_SECRET:
-            return BYBIT_READ_ONLY_KEY, BYBIT_READ_ONLY_SECRET
-        return None
-    except Exception as exc:
-        logger.warning("Supabase Bybit cred lookup: %s", exc)
-        if BYBIT_READ_ONLY_KEY and BYBIT_READ_ONLY_SECRET:
-            return BYBIT_READ_ONLY_KEY, BYBIT_READ_ONLY_SECRET
-        return None
+def _get_bybit_creds() -> tuple[str, str] | None:
+    """Return (api_key, api_secret) from .env, or None if not configured."""
+    key    = os.environ.get("BYBIT_API_KEY",    "").strip()
+    secret = os.environ.get("BYBIT_API_SECRET", "").strip()
+    return (key, secret) if (key and secret) else None
 
+# Alias for backward compat with API routes
+async def _get_user_bybit_creds(_clerk_id: str = "") -> tuple[str, str] | None:
+    return _get_bybit_creds()
 
-async def _upsert_user_bybit_creds(
-    clerk_id: str, api_key: str, api_secret: str,
-) -> None:
-    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
-        logger.warning("Supabase not configured — Bybit credentials not persisted")
-        return
-    url     = f"{SUPABASE_URL}/rest/v1/users"
-    headers = {
-        "apikey":        SUPABASE_SERVICE_ROLE_KEY,
-        "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
-        "Content-Type":  "application/json",
-        "Prefer":        "resolution=merge-duplicates",
-    }
-    payload = {
-        "clerk_id":        clerk_id,
-        "bybit_api_key":   api_key,
-        "bybit_api_secret": api_secret,
-    }
-    async with httpx.AsyncClient(timeout=8) as client:
-        resp = await client.post(url, headers=headers, json=payload)
-        resp.raise_for_status()
-    logger.info("Supabase: Bybit creds saved clerk_id=%s…", clerk_id[:8])
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  Bybit V5 — HMAC-SHA256 authentication
-#
-#  Bybit V5 signed endpoint pattern:
-#    signature = HMAC-SHA256(api_secret, timestamp + api_key + recvWindow + rawParams)
-#
-#  For GET requests: rawParams = URL query string (sorted, URL-encoded)
-#  For POST requests: rawParams = JSON body string
-#
-#  Headers:
-#    X-BAPI-API-KEY, X-BAPI-SIGN, X-BAPI-SIGN-ALGORITHM, X-BAPI-TIMESTAMP,
-#    X-BAPI-RECV-WINDOW
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _bybit_sign_get(api_key: str, api_secret: str, params: dict) -> tuple[dict, dict]:
-    """Sign a GET request. Returns (params, headers)."""
-    timestamp   = str(int(time.time() * 1000))
-    recv_window = "5000"
-    query_str   = urllib.parse.urlencode(sorted(params.items()))
-    param_str   = timestamp + api_key + recv_window + query_str
-    signature   = hmac.new(
-        api_secret.encode("utf-8"),
-        param_str.encode("utf-8"),
-        hashlib.sha256,
-    ).hexdigest()
-    headers = {
-        "X-BAPI-API-KEY":           api_key,
-        "X-BAPI-SIGN":              signature,
-        "X-BAPI-SIGN-ALGORITHM":    "HmacSHA256",
-        "X-BAPI-TIMESTAMP":         timestamp,
-        "X-BAPI-RECV-WINDOW":       recv_window,
-        "Content-Type":             "application/json",
-    }
-    return params, headers
-
-
-def _bybit_sign_post(api_key: str, api_secret: str, body: dict) -> tuple[dict, dict]:
-    """Sign a POST request. Returns (body, headers)."""
-    import json as _json
-    timestamp   = str(int(time.time() * 1000))
-    recv_window = "5000"
-    body_str    = _json.dumps(body, separators=(",", ":"))
-    param_str   = timestamp + api_key + recv_window + body_str
-    signature   = hmac.new(
-        api_secret.encode("utf-8"),
-        param_str.encode("utf-8"),
-        hashlib.sha256,
-    ).hexdigest()
-    headers = {
-        "X-BAPI-API-KEY":        api_key,
-        "X-BAPI-SIGN":           signature,
-        "X-BAPI-SIGN-ALGORITHM": "HmacSHA256",
-        "X-BAPI-TIMESTAMP":      timestamp,
-        "X-BAPI-RECV-WINDOW":    recv_window,
-        "Content-Type":          "application/json",
-    }
-    return body, headers
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  Bybit V5 — public market data helpers (no credentials required)
-#
-#  Bybit kline + tickers are fully public — no API key needed.
-#  Used by both the refresh loop and the candles/market routes.
-# ─────────────────────────────────────────────────────────────────────────────
 
 async def bybit_fetch_candles(
     symbol:   str,
@@ -900,10 +737,14 @@ async def bybit_verify_credentials(api_key: str, api_secret: str) -> bool:
 # ─────────────────────────────────────────────────────────────────────────────
 
 _MIN_ORDER_QTY: dict[str, float] = {
-    "BTCUSDT": 0.001, "ETHUSDT": 0.01, "SOLUSDT": 0.1, "XRPUSDT": 10.0,
-    "BNBUSDT": 0.01, "DOGEUSDT": 100.0, "AVAXUSDT": 0.1, "ADAUSDT": 10.0,
-    "DOTUSDT": 1.0, "MATICUSDT": 10.0, "LINKUSDT": 1.0, "LTCUSDT": 0.1,
-    "NEARUSDT": 1.0, "ATOMUSDT": 1.0, "UNIUSDT": 1.0,
+    # Blue-chip perpetuals
+    "BTCUSDT": 0.001, "ETHUSDT": 0.01,  "SOLUSDT": 0.1,  "XRPUSDT":   10.0,
+    "BNBUSDT": 0.01,  "DOGEUSDT": 100.0,"AVAXUSDT": 0.1,  "ADAUSDT":   10.0,
+    "DOTUSDT": 1.0,   "LINKUSDT": 1.0,  "LTCUSDT":  0.1,  "NEARUSDT":   1.0,
+    "ATOMUSDT": 1.0,  "UNIUSDT":  1.0,
+    # Meme coins (large qty per lot)
+    "1000PEPEUSDT": 100.0, "1000BONKUSDT": 100.0, "FARTCOINUSDT": 1.0,
+    "XPLUSDT": 1.0,        "WLFIUSDT": 10.0,
 }
 
 def _compute_safe_leverage(
@@ -924,88 +765,66 @@ def _compute_safe_leverage(
     return leverage
 
 
-async def _bybit_auto_execute(
-    sym: str, sig_dict: dict, signal: "TradeSignal",
-) -> None:
+async def _bybit_auto_execute(sym: str, sig_dict: dict, signal) -> None:
     """
-    Called when a 100% confluence Bybit signal fires.
-    Iterates over all users with bybit_auto_trade=True and places orders.
+    Hard-automate: place a Bybit market order for every 100% confluence signal.
+    Uses BYBIT_API_KEY / BYBIT_API_SECRET from .env — no user loop.
+    TradeTracker is locked BEFORE the order to prevent re-entry.
     """
     if _trade_tracker.is_locked(sym):
-        logger.info("AutoExec: %s already locked — skip", sym)
+        logger.info("AutoExec BYBIT: %s already locked — skip", sym)
         return
 
-    for clerk_id, prefs in list(_user_settings.items()):
-        if not prefs.get("bybit_auto_trade"):
-            continue
+    creds = _get_bybit_creds()
+    if not creds:
+        logger.warning("AutoExec BYBIT: BYBIT_API_KEY/SECRET not configured in .env")
+        return
 
-        leverage    = int(prefs.get("bybit_leverage",    BYBIT_DEFAULT_LEVERAGE))
-        margin_type = str(prefs.get("bybit_margin_type", "ISOLATED"))
+    api_key, api_secret = creds
 
-        creds = await _get_user_bybit_creds(clerk_id)
-        if not creds:
-            logger.warning("AutoExec: no Bybit creds for %s… — skip", clerk_id[:8])
-            continue
-
-        api_key, api_secret = creds
-
-        # Fetch account equity to size position at 1% risk
-        try:
-            account_data = await bybit_fetch_account(api_key, api_secret)
-            equity       = float(account_data.get("totalEquity", 0) or 0)
-        except Exception as exc:
-            logger.warning("AutoExec: account fetch failed for %s…: %s", clerk_id[:8], exc)
-            continue
-
+    try:
+        account_data = await bybit_fetch_account(api_key, api_secret)
+        equity = float(account_data.get("totalEquity", 0) or 0)
         if equity <= 0:
-            logger.warning("AutoExec: zero equity for %s… — skip", clerk_id[:8])
-            continue
+            logger.warning("AutoExec BYBIT: zero equity — skip %s", sym)
+            return
 
-        risk_pct   = float(prefs.get("risk_pct", 1.0)) / 100.0
-        risk_usd   = equity * risk_pct
-        entry      = signal.entry_price
-        sl         = signal.stop_loss
-        tp         = signal.take_profit
-        sl_dist    = abs(entry - sl)
+        leverage    = BYBIT_DEFAULT_LEVERAGE
+        margin_type = BYBIT_MARGIN_TYPE
+        risk_pct    = float(os.getenv("BOT_RISK_PCT", "1.0")) / 100.0
+        risk_usd    = equity * risk_pct
 
-        if sl_dist <= 0:
-            logger.warning("AutoExec: zero SL distance for %s — skip", sym)
-            continue
+        entry   = signal.entry_price
+        sl      = signal.stop_loss
+        tp      = signal.take_profit
+        sl_dist = abs(entry - sl)
+        if sl_dist == 0:
+            logger.warning("AutoExec BYBIT: SL=entry for %s — skip", sym)
+            return
 
-        # Auto-scale leverage to keep risk ≤ 80% of margin
         safe_lev = _compute_safe_leverage(entry, sl, leverage)
-        if safe_lev != leverage:
-            logger.info(
-                "AutoExec: leverage scaled %d→%d× for %s (SL distance safety)",
-                leverage, safe_lev, sym,
-            )
-
-        # qty = risk_usd / (sl_dist_per_unit × leverage)
-        # This means losing the SL distance costs exactly risk_usd
-        qty_raw  = (risk_usd * safe_lev) / (sl_dist * entry) if entry > 0 else 0
+        qty_raw  = (risk_usd * safe_lev) / (sl_dist * entry)
         min_qty  = _MIN_ORDER_QTY.get(sym, 0.001)
         qty      = max(round(qty_raw, 3), min_qty)
         side     = "Buy" if signal.direction.value == "LONG" else "Sell"
 
-        try:
-            result = await bybit_place_market_order(
-                api_key, api_secret, sym, side,
-                str(qty), sl, tp, safe_lev, margin_type,
-            )
-            trade_id = (
-                result.get("result", {}).get("orderId", "")
-                or result.get("result", {}).get("orderLinkId", "")
-            )
-            # Lock the instrument to prevent signal spam
-            _trade_tracker.lock(sym, signal.direction.value, entry, trade_id)
-            logger.info(
-                "✅ AutoExec ORDER PLACED: %s %s %s  qty=%.3f  lev=%d×  "
-                "entry=%.4f  sl=%.4f  tp=%.4f  clerk=%s…",
-                sym, side, margin_type, qty, safe_lev,
-                entry, sl, tp, clerk_id[:8],
-            )
-        except Exception as exc:
-            logger.error("AutoExec ORDER FAILED %s for %s…: %s", sym, clerk_id[:8], exc)
+        # Lock instrument BEFORE order to prevent duplicate from next refresh tick
+        _trade_tracker.lock(sym, signal.direction.value, entry, "pending")
+
+        result   = await bybit_place_market_order(
+            api_key, api_secret, sym, side, str(qty), sl, tp, safe_lev, margin_type,
+        )
+        trade_id = result.get("result", {}).get("orderId", "")
+        _trade_tracker.lock(sym, signal.direction.value, entry, trade_id)  # update with real ID
+
+        logger.info(
+            "✅ BYBIT AUTO-EXEC: %s %s %s  qty=%.3f  lev=%d×  entry=%.4f  sl=%.4f  tp=%.4f",
+            sym, side, margin_type, qty, safe_lev, entry, sl, tp,
+        )
+    except Exception as exc:
+        logger.error("AutoExec BYBIT FAILED %s: %s", sym, exc)
+        _trade_tracker.unlock(sym)   # release lock if order failed
+
 
 
 async def bybit_refresh_loop() -> None:
@@ -1178,6 +997,64 @@ async def _send_onesignal_push(title: str, body: str, data: dict) -> None:
         logger.warning("OneSignal push error: %s", exc)
 
 
+async def _oanda_auto_execute(ins: str, sig_dict: dict, signal) -> None:
+    """
+    Hard-automate: place an Oanda market order for every 100% confluence signal.
+    Uses OANDA_API_KEY / OANDA_ACCOUNT_ID from .env.
+    Position sizing: risk_pct% of account NAV, SL as submitted stop.
+    """
+    if _trade_tracker.is_locked(ins):
+        logger.info("AutoExec OANDA: %s already locked — skip", ins)
+        return
+
+    creds = _get_oanda_creds()
+    if not creds:
+        logger.warning("AutoExec OANDA: OANDA_API_KEY/ACCOUNT_ID not configured in .env")
+        return
+
+    api_key, account_id = creds
+
+    try:
+        summary  = await fetch_account_summary(api_key, account_id)
+        nav      = float(summary.get("account", {}).get("NAV", 0) or 0)
+        if nav <= 0:
+            logger.warning("AutoExec OANDA: zero NAV — skip %s", ins)
+            return
+
+        risk_pct = float(os.getenv("BOT_RISK_PCT", "1.0")) / 100.0
+        risk_usd = nav * risk_pct
+        entry    = signal.entry_price
+        sl       = signal.stop_loss
+        tp       = signal.take_profit
+        sl_dist  = abs(entry - sl)
+        if sl_dist == 0:
+            logger.warning("AutoExec OANDA: SL=entry for %s — skip", ins)
+            return
+
+        # Units = risk_usd / sl_pips
+        # For Forex: sl_dist is in price. For USD quote pairs, pip value ≈ 1 USD per 1 unit.
+        units_raw = int(risk_usd / sl_dist)
+        units     = units_raw if signal.direction.value == "LONG" else -units_raw
+        if abs(units) < 1:
+            logger.warning("AutoExec OANDA: computed units<1 for %s — skip", ins)
+            return
+
+        # Lock BEFORE order
+        _trade_tracker.lock(ins, signal.direction.value, entry, "pending")
+
+        result   = await place_market_order(api_key, account_id, ins, units, sl, tp)
+        trade_id = (result.get("orderCreateTransaction") or {}).get("id", "")
+        _trade_tracker.lock(ins, signal.direction.value, entry, trade_id)
+
+        logger.info(
+            "✅ OANDA AUTO-EXEC: %s %s  units=%d  entry=%.5f  sl=%.5f  tp=%.5f",
+            ins, signal.direction.value, units, entry, sl, tp,
+        )
+    except Exception as exc:
+        logger.error("AutoExec OANDA FAILED %s: %s", ins, exc)
+        _trade_tracker.unlock(ins)   # release lock if order failed
+
+
 async def candle_refresh_loop() -> None:
     FETCH_TIMEOUT = 25.0
     MAX_BACKOFF   = 40.0
@@ -1229,24 +1106,33 @@ async def candle_refresh_loop() -> None:
                                 "layer3":     signal.layer3_mss,
                                 "timestamp":  signal.timestamp,
                             }
-                            _signal_history[ins] = ([sig_dict] + _signal_history[ins])[:50]
-                            await broadcast(sig_dict)
-                            logger.info("🟢 SIGNAL: %s %s", ins, signal.direction.value)
-                            if signal.confidence >= 95:
-                                asyncio.create_task(_send_onesignal_push(
-                                    title = f"🚨 High Probability Setup: {ins.replace('_','/')} {signal.direction.value.title()}",
-                                    body  = (
-                                        f"Entry at {signal.entry_price:.5f}  ·  "
-                                        f"{signal.confidence}% confluence  ·  "
-                                        f"R:R 1:{signal.risk_reward}"
-                                    ),
-                                    data  = {
-                                        "instrument": ins,
-                                        "direction":  signal.direction.value,
-                                        "entry":      round(signal.entry_price, 5),
-                                        "confidence": signal.confidence,
-                                    },
-                                ))
+                            # ── Signal deduplication: skip if instrument locked ────────
+                            if _trade_tracker.is_locked(ins):
+                                logger.debug("TradeTracker: SKIP %s — instrument locked", ins)
+                            else:
+                                _signal_history[ins] = ([sig_dict] + _signal_history[ins])[:50]
+                                await broadcast(sig_dict)
+                                logger.info("🟢 OANDA SIGNAL: %s %s  conf=%d%%", ins, signal.direction.value, signal.confidence)
+                                if signal.confidence >= 95:
+                                    asyncio.create_task(_send_onesignal_push(
+                                        title = f"🚨 {ins.replace('_','/')} {signal.direction.value.title()} Setup",
+                                        body  = (
+                                            f"Entry {signal.entry_price:.5f}  ·  "
+                                            f"{signal.confidence}% confluence  ·  "
+                                            f"R:R 1:{signal.risk_reward}"
+                                        ),
+                                        data  = {
+                                            "instrument": ins,
+                                            "direction":  signal.direction.value,
+                                            "entry":      round(signal.entry_price, 5),
+                                            "confidence": signal.confidence,
+                                        },
+                                    ))
+                                # ── Hard auto-execute at 100% confluence ───────────
+                                if signal.confidence >= 100:
+                                    asyncio.create_task(
+                                        _oanda_auto_execute(ins, sig_dict, signal)
+                                    )
                 except Exception as smc_exc:
                     logger.warning("SMC error %s: %s", ins, smc_exc)
         except Exception as loop_exc:
@@ -1299,17 +1185,22 @@ async def price_stream_loop() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("━" * 60)
-    logger.info("  FX Radiant v2.3 — Oanda + Bybit dual engine")
+    logger.info("  FX Radiant v3.0 — Private Bot Mode  🤖")
+    logger.info("  Elite 35: %d Oanda + %d Bybit instruments", len(INSTRUMENTS), len(BYBIT_SYMBOLS))
     await _fetch_clerk_jwks()
 
-    logger.info("  OANDA_API_KEY       : %s",
+    logger.info("  OANDA_API_KEY     : %s",
                 "✅ set" if os.environ.get("OANDA_API_KEY",    "").strip() else "❌ MISSING")
-    logger.info("  OANDA_ACCOUNT_ID    : %s",
+    logger.info("  OANDA_ACCOUNT_ID  : %s",
                 "✅ set" if os.environ.get("OANDA_ACCOUNT_ID", "").strip() else "❌ MISSING")
-    logger.info("  BYBIT_READ_ONLY_KEY : %s",
-                "✅ set" if BYBIT_READ_ONLY_KEY else "⚠️  not set (public market data only)")
-    logger.info("  SUPABASE_URL        : %s",
-                "✅ set" if SUPABASE_URL else "⚠️  not set (env-only credentials)")
+    logger.info("  BYBIT_API_KEY     : %s",
+                "✅ set" if BYBIT_API_KEY else "❌ MISSING — Bybit orders won't execute")
+    logger.info("  BYBIT_API_SECRET  : %s",
+                "✅ set" if BYBIT_API_SECRET else "❌ MISSING — Bybit orders won't execute")
+    logger.info("  BOT_RISK_PCT      : %s%%",
+                os.environ.get("BOT_RISK_PCT", "1.0"))
+    logger.info("  BYBIT_LEVERAGE    : %d×  (%s margin)",
+                BYBIT_DEFAULT_LEVERAGE, BYBIT_MARGIN_TYPE)
     logger.info("  Clerk keys cached : %d", len(_clerk_jwks))
     logger.info("━" * 60)
 
@@ -1379,8 +1270,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="FX Radiant API",
-    version="2.2.0",
-    description="SMC/ICT — Oanda + Bybit dual engine, Clerk JWT auth",
+    version="3.0.0",
+    description="FX Radiant — Private Bot Mode, Elite 35, Hard Auto-Execute",
     lifespan=lifespan,
 )
 
@@ -1413,28 +1304,13 @@ class OrderRequest(BaseModel):
     stop_loss:   float
     take_profit: float
 
-class OandaCredentialsRequest(BaseModel):
-    oanda_api_key:    str
-    oanda_account_id: str
-
-class BybitCredentialsRequest(BaseModel):
-    bybit_api_key:    str
-    bybit_api_secret: str
+# OandaCredentialsRequest / BybitCredentialsRequest removed — env-only mode
 
 class PushRegisterRequest(BaseModel):
     player_id: str
 
 
-class BybitSettingsRequest(BaseModel):
-    bybit_auto_trade:  Optional[bool]  = None
-    bybit_leverage:    Optional[int]   = None   # 10–50
-    bybit_margin_type: Optional[str]   = None   # "ISOLATED" | "CROSS"
-
-class UserSettingsRequest(BaseModel):
-    auto_trade_enabled: Optional[bool]  = None
-    risk_pct:           Optional[float] = None
-    oanda_key_hint:     Optional[str]   = None
-    display_name:       Optional[str]   = None
+# BybitSettingsRequest / UserSettingsRequest removed — env-only mode
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1443,142 +1319,22 @@ class UserSettingsRequest(BaseModel):
 
 @app.get("/api/auth/me")
 async def me(payload: dict = Depends(get_current_user)):
-    """
-    Return backend settings for this user, including both Oanda and Bybit
-    credential hints so the Profile page renders both sections correctly.
-    """
-    clerk_id = payload["sub"]
-    s = _settings(clerk_id)
-
-    # Lazily populate Oanda account_id
-    account_id = s.get("oanda_account_id", "")
-    if not account_id and SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY:
-        try:
-            creds = await _get_user_oanda_creds(clerk_id)
-            if creds:
-                account_id = creds[1]
-                s["oanda_account_id"] = account_id
-        except Exception:
-            pass
-
-    # Lazily populate Bybit hints from personal Supabase row (not global fallback)
-    bybit_key_hint    = s.get("bybit_key_hint",    "")
-    bybit_secret_hint = s.get("bybit_secret_hint", "")
-    if not bybit_key_hint and SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY:
-        try:
-            url     = f"{SUPABASE_URL}/rest/v1/users"
-            headers = {
-                "apikey":        SUPABASE_SERVICE_ROLE_KEY,
-                "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
-            }
-            params = {
-                "clerk_id": f"eq.{clerk_id}",
-                "select":   "bybit_api_key,bybit_api_secret",
-            }
-            async with httpx.AsyncClient(timeout=5) as client:
-                r    = await client.get(url, headers=headers, params=params)
-                rows = r.json() if r.status_code == 200 else []
-            if rows and rows[0].get("bybit_api_key"):
-                bybit_key_hint    = rows[0]["bybit_api_key"][-4:]
-                bybit_secret_hint = (rows[0].get("bybit_api_secret") or "")[-4:]
-                s["bybit_key_hint"]    = bybit_key_hint
-                s["bybit_secret_hint"] = bybit_secret_hint
-        except Exception:
-            pass
-
+    """Bot status endpoint — credentials are managed via .env."""
     return {
-        "clerk_id":           clerk_id,
-        "auto_trade_enabled": s["auto_trade_enabled"],
-        "risk_pct":           s["risk_pct"],
-        "oanda_key_hint":     s["oanda_key_hint"],
-        "oanda_account_id":   account_id,
-        "bybit_key_hint":     bybit_key_hint,
-        "bybit_secret_hint":  bybit_secret_hint,
-        # Bybit trading preferences
-        "bybit_auto_trade":   s.get("bybit_auto_trade",  False),
-        "bybit_leverage":     s.get("bybit_leverage",    BYBIT_DEFAULT_LEVERAGE),
-        "bybit_margin_type":  s.get("bybit_margin_type", "ISOLATED"),
+        "bot_mode":          "PRIVATE",
+        "oanda_connected":   bool(_get_oanda_creds()),
+        "bybit_connected":   bool(_get_bybit_creds()),
+        "oanda_instruments": len(INSTRUMENTS),
+        "bybit_symbols":     len(BYBIT_SYMBOLS),
+        "trade_locks":       len(_trade_tracker.all_locks()),
+        "clerk_id":          payload["sub"],
     }
 
 
-@app.patch("/api/users/me/settings")
-async def update_user_settings(
-    body:    UserSettingsRequest,
-    payload: dict = Depends(get_current_user),
-):
-    clerk_id = payload["sub"]
-    s = _settings(clerk_id)
-    if body.auto_trade_enabled is not None:
-        s["auto_trade_enabled"] = body.auto_trade_enabled
-    if body.risk_pct is not None:
-        s["risk_pct"] = max(0.1, min(10.0, float(body.risk_pct)))
-    if body.oanda_key_hint is not None:
-        hint = body.oanda_key_hint.strip()
-        s["oanda_key_hint"] = hint[-4:] if hint else ""
-    return {
-        "clerk_id":           clerk_id,
-        "auto_trade_enabled": s["auto_trade_enabled"],
-        "risk_pct":           s["risk_pct"],
-        "oanda_key_hint":     s["oanda_key_hint"],
-    }
 
 
-@app.post("/api/users/me/oanda-credentials")
-async def save_oanda_credentials(
-    body:    OandaCredentialsRequest,
-    payload: dict = Depends(get_current_user),
-):
-    clerk_id   = payload["sub"]
-    api_key    = body.oanda_api_key.strip()
-    account_id = body.oanda_account_id.strip()
-    if not api_key or not account_id:
-        raise HTTPException(400, "Both oanda_api_key and oanda_account_id are required")
-    try:
-        await fetch_account_summary(api_key, account_id)
-    except Exception:
-        raise HTTPException(422, "Could not verify credentials — check your Oanda API key and account ID")
-    await _upsert_user_oanda_creds(clerk_id, api_key, account_id)
-    s = _settings(clerk_id)
-    s["oanda_key_hint"]   = api_key[-4:]
-    s["oanda_account_id"] = account_id
-    return {
-        "saved":            True,
-        "oanda_account_id": account_id,
-        "oanda_key_hint":   api_key[-4:],
-    }
 
 
-@app.post("/api/users/me/bybit-credentials")
-async def save_bybit_credentials(
-    body:    BybitCredentialsRequest,
-    payload: dict = Depends(get_current_user),
-):
-    """
-    Validate and persist the user's Bybit API key + secret.
-
-    1. Both fields required
-    2. Verify by calling bybit_verify_credentials() — any error → HTTP 422
-    3. Upsert into Supabase (bybit_api_key, bybit_api_secret columns)
-    4. Cache last-4-char hints in _user_settings for immediate /auth/me hydration
-    """
-    clerk_id   = payload["sub"]
-    api_key    = body.bybit_api_key.strip()
-    api_secret = body.bybit_api_secret.strip()
-    if not api_key or not api_secret:
-        raise HTTPException(400, "Both bybit_api_key and bybit_api_secret are required")
-    try:
-        await bybit_verify_credentials(api_key, api_secret)
-    except Exception as exc:
-        raise HTTPException(422, f"Could not verify Bybit credentials: {exc}")
-    await _upsert_user_bybit_creds(clerk_id, api_key, api_secret)
-    s = _settings(clerk_id)
-    s["bybit_key_hint"]    = api_key[-4:]
-    s["bybit_secret_hint"] = api_secret[-4:]
-    return {
-        "saved":             True,
-        "bybit_key_hint":    api_key[-4:],
-        "bybit_secret_hint": api_secret[-4:],
-    }
 
 
 @app.post("/api/push/register")
@@ -1660,54 +1416,8 @@ async def get_signals(_: dict = Depends(get_current_user)):
 #  Bybit trading settings & trade tracker routes
 # ─────────────────────────────────────────────────────────────────────────────
 
-@app.patch("/api/bybit/settings")
-async def update_bybit_settings(
-    body:    BybitSettingsRequest,
-    payload: dict = Depends(get_current_user),
-):
-    """
-    Update per-user Bybit trading settings:
-      • bybit_auto_trade  — enable/disable auto-execution
-      • bybit_leverage    — 10–50× (default 20)
-      • bybit_margin_type — "ISOLATED" | "CROSS"
-    """
-    clerk_id = payload["sub"]
-    s = _settings(clerk_id)
-
-    if body.bybit_auto_trade is not None:
-        s["bybit_auto_trade"] = body.bybit_auto_trade
-        logger.info(
-            "Bybit auto-trade %s for %s…",
-            "ENABLED" if body.bybit_auto_trade else "DISABLED",
-            clerk_id[:8],
-        )
-
-    if body.bybit_leverage is not None:
-        s["bybit_leverage"] = max(1, min(50, int(body.bybit_leverage)))
-
-    if body.bybit_margin_type is not None:
-        if body.bybit_margin_type not in ("ISOLATED", "CROSS"):
-            raise HTTPException(400, "bybit_margin_type must be 'ISOLATED' or 'CROSS'")
-        s["bybit_margin_type"] = body.bybit_margin_type
-
-    return {
-        "clerk_id":          clerk_id,
-        "bybit_auto_trade":  s["bybit_auto_trade"],
-        "bybit_leverage":    s["bybit_leverage"],
-        "bybit_margin_type": s["bybit_margin_type"],
-    }
 
 
-@app.get("/api/bybit/settings")
-async def get_bybit_settings(payload: dict = Depends(get_current_user)):
-    """Return current Bybit trading settings for this user."""
-    clerk_id = payload["sub"]
-    s = _settings(clerk_id)
-    return {
-        "bybit_auto_trade":  s.get("bybit_auto_trade",  False),
-        "bybit_leverage":    s.get("bybit_leverage",    BYBIT_DEFAULT_LEVERAGE),
-        "bybit_margin_type": s.get("bybit_margin_type", "ISOLATED"),
-    }
 
 
 @app.get("/api/bybit/trade-locks")
@@ -1980,13 +1690,15 @@ async def websocket_endpoint(ws: WebSocket, token: str = ""):
 async def health():
     return {
         "status":               "ok",
-        "version":              "2.4.0",
+        "version":              "3.0.0",
         "auth":                 "clerk",
         "jwks_keys":            len(_clerk_jwks),
         "ws_clients":           len(_ws_clients),
         "oanda_prices_cached":  len(_latest_prices),
         "bybit_prices_cached":  sum(1 for p in _bybit_prices.values() if p > 0),
         "bybit_signals_total":  sum(len(v) for v in _bybit_signal_history.values()),
-        "bybit_trade_locks":    len(_trade_tracker.all_locks()),
+        "trade_locks":          len(_trade_tracker.all_locks()),
+        "oanda_executor":       "READY" if _get_oanda_creds() else "NO_CREDS",
+        "bybit_executor":       "READY" if _get_bybit_creds() else "NO_CREDS",
         "timestamp":            int(time.time()),
     }

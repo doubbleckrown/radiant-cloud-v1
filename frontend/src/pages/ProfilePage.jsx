@@ -85,9 +85,7 @@ export default function ProfilePage() {
   const {
     auto_trade_enabled, risk_pct,
     oanda_key_hint, oanda_account_id,
-    bybit_key_hint, bybit_secret_hint,
-    bybit_auto_trade, bybit_leverage, bybit_margin_type,
-    updateSettings, saveOandaCredentials, saveBybitCredentials,
+    updateSettings,
   } = useAuthStore();
   const { isCrypto, accent, accentDim, accentBdr } = useTheme();
 
@@ -105,11 +103,8 @@ export default function ProfilePage() {
     risk_pct:          risk_pct           ?? 1.0,
     oanda_key_hint:    oanda_key_hint      ?? "",
     oanda_account_id:  oanda_account_id    ?? "",
-    bybit_key_hint:    bybit_key_hint      ?? "",
-    bybit_secret_hint: bybit_secret_hint   ?? "",
-    bybit_auto_trade:  bybit_auto_trade    ?? false,
-    bybit_leverage:    bybit_leverage      ?? 20,
-    bybit_margin_type: bybit_margin_type   ?? "ISOLATED",
+
+
   };
 
   // ── Editing state ─────────────────────────────────────────────────────────
@@ -270,130 +265,10 @@ export default function ProfilePage() {
           <StaticRow icon="📧" label="Email" value={user.email || "—"} />
         </Section>
 
-        {/* ══════════════════════════════════════════════════════════════════
-            CREDENTIALS — mode-conditional
-            FOREX → Oanda API key + account ID
-            CRYPTO → Bybit API key + API secret (with read-only fallback notice)
-        ══════════════════════════════════════════════════════════════════ */}
-        <AnimatePresence mode="wait">
-          {isCrypto ? (
-            <motion.div
-              key="bybit-creds"
-              initial={{ opacity: 0, y: 6 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -6 }}
-              transition={{ duration: 0.22 }}
-            >
-              <BybitCredentialsSection
-                keyHint={user.bybit_key_hint}
-                secretHint={user.bybit_secret_hint}
-                saveBybitCredentials={saveBybitCredentials}
-              />
-            </motion.div>
-          ) : (
-            <motion.div
-              key="oanda-creds"
-              initial={{ opacity: 0, y: 6 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -6 }}
-              transition={{ duration: 0.22 }}
-            >
-              <OandaCredentialsSection
-                keyHint={user.oanda_key_hint}
-                accountId={user.oanda_account_id}
-                saveOandaCredentials={saveOandaCredentials}
-              />
-            </motion.div>
-          )}
-        </AnimatePresence>
+        {/* ── Bot Status (replaces credential forms in Private Bot Mode) ──── */}
+        <BotStatusSection isCrypto={isCrypto} accent={accent} accentDim={accentDim} accentBdr={accentBdr} />
 
-        {/* ── Bybit Trading Settings (CRYPTO mode only) ────────────────────── */}
-        <AnimatePresence>
-          {isCrypto && (
-            <motion.div
-              key="bybit-trading"
-              initial={{ opacity: 0, y: 6 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -6 }}
-              transition={{ duration: 0.22 }}
-            >
-              <BybitTradingSettings
-                marginType={user.bybit_margin_type}
-                leverage={user.bybit_leverage}
-                autoTrade={user.bybit_auto_trade}
-              />
-            </motion.div>
-          )}
-        </AnimatePresence>
-
-        {/* ── Section 2: Risk Configuration ────────────────────────────────── */}
-        <Section label="Risk Configuration">
-          <EditableRow
-            icon="📊" label="Risk % Per Trade" value={`${user.risk_pct.toFixed(1)}%`}
-            valueSub={riskLabel(user.risk_pct)}
-            isEditing={editing === "risk"} isSaving={saving === "risk"}
-            onEdit={() => openEdit("risk")} onCancel={cancelEdit} onSave={() => commit("risk")}
-          >
-            <RiskSlider value={draftRisk} onChange={setDraftRisk} />
-          </EditableRow>
-          <StaticRow icon="⚖️" label="Risk / Reward Ratio" value="1 : 3" sub="Fixed by SMC engine" />
-        </Section>
-
-        {/* ── Section 3: Auto-Trade Status ─────────────────────────────────── */}
-        <Section label="Auto-Trade">
-          <div style={{
-            display: "flex", alignItems: "center", gap: 12, padding: "14px 16px",
-            background: user.auto_trade ? `${accent}0d` : "transparent",
-            transition: "background 0.3s",
-          }}>
-            <motion.div
-              animate={{
-                background: user.auto_trade ? accentDim : "rgba(255,255,255,0.04)",
-                border:     `1px solid ${user.auto_trade ? accentBdr : C.cardBdr}`,
-              }}
-              transition={{ duration: 0.3 }}
-              style={{
-                width: 40, height: 40, borderRadius: 12, flexShrink: 0,
-                display: "flex", alignItems: "center", justifyContent: "center", fontSize: "1.1rem",
-              }}
-            >
-              {user.auto_trade ? "⚡" : "🤖"}
-            </motion.div>
-            <div style={{ flex: 1 }}>
-              <p style={{ color: C.white, fontSize: "0.88rem", fontWeight: 600, margin: "0 0 2px" }}>
-                Master Auto-Trade
-              </p>
-              <motion.p
-                animate={{ color: user.auto_trade ? accent : C.sub }}
-                transition={{ duration: 0.3 }}
-                style={{ fontSize: "0.68rem", margin: 0 }}
-              >
-                {user.auto_trade ? "ACTIVE — live orders enabled" : "OFF — signals monitored only"}
-              </motion.p>
-            </div>
-            <motion.span
-              animate={{
-                background: user.auto_trade ? accentDim : "rgba(255,255,255,0.04)",
-                border:     `1px solid ${user.auto_trade ? accentBdr : C.cardBdr}`,
-                color:      user.auto_trade ? accent : C.sub,
-              }}
-              transition={{ duration: 0.3 }}
-              style={{
-                padding: "3px 9px", borderRadius: 6, fontSize: "0.6rem", fontWeight: 700,
-                letterSpacing: "0.1em", textTransform: "uppercase", fontFamily: FONT_MONO,
-              }}
-            >
-              {user.auto_trade ? "ON" : "OFF"}
-            </motion.span>
-          </div>
-          <div style={{ padding: "0 16px 12px" }}>
-            <p style={{ color: C.sub, fontSize: "0.7rem", margin: 0 }}>
-              Toggle from the Account → Summary tab.
-            </p>
-          </div>
-        </Section>
-
-        {/* ── Section 4: Security ──────────────────────────────────────────── */}
+                {/* ── Section 4: Security ──────────────────────────────────────────── */}
         <Section label="Security">
           <StaticRow icon="🔒" label="Authentication" value="Clerk" sub="Managed identity · industry standard" />
           <StaticRow icon="📱" label="Session"        value="Active" sub="Managed by Clerk SSO" />
@@ -429,6 +304,100 @@ export default function ProfilePage() {
 // ═════════════════════════════════════════════════════════════════════════════
 //  OandaCredentialsSection — FOREX mode credentials form
 // ═════════════════════════════════════════════════════════════════════════════
+// ─────────────────────────────────────────────────────────────────────────────
+//  BotStatusSection — Private Bot Mode
+// ─────────────────────────────────────────────────────────────────────────────
+function BotStatusSection({ isCrypto, accent }) {
+  const [status, setStatus] = useState(null);
+  const BYBIT_ORANGE = "#FFA500";
+  const engineColor  = isCrypto ? BYBIT_ORANGE : accent;
+
+  useEffect(() => {
+    import("../utils/api").then(({ default: api }) =>
+      api.get("/auth/me").then(({ data }) => setStatus(data)).catch(() => {})
+    );
+  }, []);
+
+  const rows = isCrypto ? [
+    {
+      icon: "₿", label: "Bybit API",
+      ok: status?.bybit_connected ?? false,
+      status: status == null ? "CHECKING…" : (status.bybit_connected ? "CONNECTED" : "NOT CONFIGURED"),
+      sub: status?.bybit_connected
+        ? `${status.bybit_symbols ?? 19} symbols · USDT Perpetuals · Linear`
+        : "Set BYBIT_API_KEY + BYBIT_API_SECRET in .env",
+    },
+    {
+      icon: "⚡", label: "Auto-Execute",
+      ok: status?.bybit_connected ?? false,
+      status: status?.bybit_connected ? "ARMED" : "OFFLINE",
+      sub: "Fires Bybit market orders at 100% SMC confluence · 20× Isolated",
+    },
+  ] : [
+    {
+      icon: "📈", label: "Oanda API",
+      ok: status?.oanda_connected ?? false,
+      status: status == null ? "CHECKING…" : (status.oanda_connected ? "CONNECTED" : "NOT CONFIGURED"),
+      sub: status?.oanda_connected
+        ? `${status.oanda_instruments ?? 16} instruments · v20 REST + WebSocket`
+        : "Set OANDA_API_KEY + OANDA_ACCOUNT_ID in .env",
+    },
+    {
+      icon: "⚡", label: "Auto-Execute",
+      ok: status?.oanda_connected ?? false,
+      status: status?.oanda_connected ? "ARMED" : "OFFLINE",
+      sub: "Fires Oanda market orders at 100% SMC confluence · Max Margin",
+    },
+  ];
+
+  return (
+    <div>
+      <p style={{
+        color: C.sub, fontSize: "0.6rem", fontWeight: 600,
+        letterSpacing: "0.12em", textTransform: "uppercase",
+        margin: "0 0 8px 4px",
+      }}>Bot Status</p>
+      <div style={{
+        borderRadius: 16, overflow: "hidden", background: C.card,
+        border: `1px solid rgba(${isCrypto ? "255,165,0" : "0,255,65"},0.2)`,
+      }}>
+        {rows.map((row, i) => (
+          <div key={row.label} style={{
+            display: "flex", alignItems: "center", gap: 14, padding: "14px 16px",
+            borderBottom: i < rows.length - 1 ? `1px solid ${C.cardBdr}` : "none",
+          }}>
+            <div style={{
+              width: 40, height: 40, borderRadius: 12, flexShrink: 0,
+              display: "flex", alignItems: "center", justifyContent: "center", fontSize: "1.1rem",
+              background: row.ok ? `${engineColor}10` : "rgba(255,255,255,0.04)",
+              border: `1px solid ${row.ok ? `${engineColor}30` : C.cardBdr}`,
+            }}>{row.icon}</div>
+            <div style={{ flex: 1 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
+                <p style={{ color: C.white, fontSize: "0.88rem", fontWeight: 600, margin: 0 }}>{row.label}</p>
+                <span style={{
+                  fontSize: "0.55rem", fontWeight: 700, padding: "2px 7px", borderRadius: 5,
+                  background: row.ok ? `${engineColor}10` : "rgba(255,58,58,0.1)",
+                  border: `1px solid ${row.ok ? `${engineColor}28` : "rgba(255,58,58,0.25)"}`,
+                  color: row.ok ? engineColor : C.red, fontFamily: FONT_MONO, letterSpacing: "0.08em",
+                }}>{row.status}</span>
+              </div>
+              <p style={{ color: C.sub, fontSize: "0.67rem", margin: "3px 0 0" }}>{row.sub}</p>
+            </div>
+          </div>
+        ))}
+        <div style={{ padding: "12px 16px", borderTop: `1px solid ${C.cardBdr}`, background: "rgba(0,0,0,0.3)" }}>
+          <p style={{ color: C.sub, fontSize: "0.65rem", margin: 0, lineHeight: 1.6 }}>
+            🔐 Credentials are managed server-side via <span style={{ color: C.label, fontFamily: FONT_MONO, fontSize: "0.6rem" }}>.env</span>.
+            No API keys are stored in the browser.
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
 function OandaCredentialsSection({ keyHint, accountId, saveOandaCredentials }) {
   const { accent, accentDim, accentBdr } = useTheme();
   const [open,       setOpen]       = useState(false);

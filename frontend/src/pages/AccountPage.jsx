@@ -53,11 +53,9 @@ const BYBIT_HEADERS = { "X-App-Mode": "CRYPTO" };
 export default function AccountPage() {
   const { user: clerkUser } = useUser();
   const { isCrypto, accent, accentDim, accentBdr } = useTheme();
-  const { auto_trade_enabled, fetchMe, updateAutoTrade } = useAuthStore();
+  // authStore: mode only in private bot mode
 
   const [toggling,    setToggling]    = useState(false);
-  const [toggleError, setToggleError] = useState(null);
-  const autoTradeOn = auto_trade_enabled ?? false;
 
   const [activeTab, setActiveTab] = useState("Summary");
   const [loading,   setLoading]   = useState({});
@@ -198,13 +196,7 @@ export default function AccountPage() {
   }, []);
 
   // ── Auto-trade toggle (Oanda only) ────────────────────────────────────────
-  const handleToggle = useCallback(async () => {
-    if (toggling) return;
-    setToggling(true); setToggleError(null);
-    try   { await updateAutoTrade(!autoTradeOn); }
-    catch (e) { setToggleError(e.userMessage ?? "Could not save setting"); }
-    finally   { setToggling(false); }
-  }, [toggling, autoTradeOn, updateAutoTrade]);
+
 
   // ── Active state (routed by mode) ─────────────────────────────────────────
   const activeAccount   = isCrypto ? bybitAccount   : account;
@@ -273,17 +265,7 @@ export default function AccountPage() {
       <div style={{ padding: "16px 16px 32px", display: "flex", flexDirection: "column", gap: 12 }}>
 
         {/* AUTO-TRADE TOGGLE — Oanda only; Bybit auto-trading */}
-        {!isCrypto && (
-          <AutoTradeToggle
-            isOn={autoTradeOn}
-            toggling={toggling}
-            error={toggleError}
-            onToggle={handleToggle}
-          />
-        )}
-        {isCrypto && <BybitAutoTradeNotice />}
-
-        {/* TAB BAR */}
+             {/* TAB BAR */}
         <div style={{
           display: "flex", borderRadius: 16, overflow: "hidden",
           background: C.card, border: `1px solid ${C.cardBdr}`,
@@ -423,172 +405,8 @@ function BalanceSparkline({ points, accent }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  AutoTradeToggle  (UNCHANGED — Oanda only)
-// ─────────────────────────────────────────────────────────────────────────────
-function AutoTradeToggle({ isOn, toggling, error, onToggle }) {
-  return (
-    <motion.div
-      className={isOn ? "border-glow-green" : ""}
-      animate={{ background: isOn ? "rgba(0,255,65,0.06)" : C.card }}
-      transition={{ duration: 0.25 }}
-      style={{
-        borderRadius: 16,
-        border: `1px solid ${isOn ? C.greenBdr : C.cardBdr}`,
-      }}
-    >
-      <div style={{ padding: 16 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          <motion.div
-            animate={{ background: isOn ? "rgba(0,255,65,0.14)" : "rgba(255,255,255,0.05)" }}
-            transition={{ duration: 0.2 }}
-            style={{
-              width: 44, height: 44, borderRadius: 12,
-              display: "flex", alignItems: "center", justifyContent: "center",
-              fontSize: "1.3rem", flexShrink: 0,
-              border: `1px solid ${isOn ? "rgba(0,255,65,0.3)" : C.cardBdr}`,
-            }}
-          >
-            {isOn ? "⚡" : "🤖"}
-          </motion.div>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <p style={{
-              color: C.white, fontSize: "0.9rem", fontWeight: 600,
-              margin: 0, letterSpacing: "0.02em", fontFamily: FONT_UI,
-            }}>
-              Master Auto-Trade
-            </p>
-            <motion.p
-              animate={{ color: isOn ? C.green : C.sub }}
-              transition={{ duration: 0.2 }}
-              style={{ fontSize: "0.68rem", margin: "3px 0 0", letterSpacing: "0.04em", fontFamily: FONT_UI }}
-            >
-              {isOn ? "ACTIVE — signals execute automatically" : "OFF — signals monitored only"}
-            </motion.p>
-          </div>
-          <button
-            onClick={onToggle}
-            disabled={toggling}
-            aria-pressed={isOn}
-            aria-label={isOn ? "Disable auto-trade" : "Enable auto-trade"}
-            style={{
-              background: "transparent", border: "none",
-              cursor: toggling ? "not-allowed" : "pointer",
-              opacity: toggling ? 0.65 : 1,
-              padding: 0, flexShrink: 0,
-              minWidth: 44, minHeight: 44,
-              display: "flex", alignItems: "center", justifyContent: "center",
-            }}
-          >
-            {toggling ? (
-              <motion.div
-                animate={{ rotate: 360 }}
-                transition={{ duration: 0.6, repeat: Infinity, ease: "linear" }}
-                style={{
-                  width: 20, height: 20, borderRadius: "50%",
-                  border: "2px solid transparent",
-                  borderTopColor: isOn ? C.green : "#666",
-                }}
-              />
-            ) : (
-              <motion.div
-                animate={{ backgroundColor: isOn ? C.green : "#1f1f1f" }}
-                transition={{ duration: 0.2 }}
-                style={{
-                  width: 54, height: 28, borderRadius: 14, position: "relative",
-                  border: `1px solid ${isOn ? "rgba(0,255,65,0.6)" : C.cardBdr}`,
-                  boxShadow: isOn ? "0 0 10px rgba(0,255,65,0.4)" : "none",
-                }}
-              >
-                <motion.div
-                  animate={{ x: isOn ? 27 : 2 }}
-                  transition={{ type: "spring", stiffness: 480, damping: 32 }}
-                  style={{
-                    position: "absolute", top: 3,
-                    width: 20, height: 20, borderRadius: "50%",
-                    background: isOn ? "#000" : "#555",
-                    boxShadow: isOn ? "0 0 6px rgba(0,255,65,0.9)" : "none",
-                  }}
-                />
-              </motion.div>
-            )}
-          </button>
-        </div>
-        <AnimatePresence>
-          {isOn && (
-            <motion.div
-              initial={{ opacity: 0, height: 0, marginTop: 0 }}
-              animate={{ opacity: 1, height: "auto", marginTop: 12 }}
-              exit={{ opacity: 0, height: 0, marginTop: 0 }}
-              style={{ overflow: "hidden" }}
-            >
-              <div style={{
-                padding: "8px 12px", borderRadius: 10,
-                background: "rgba(255,184,0,0.06)",
-                border: "1px solid rgba(255,184,0,0.22)",
-                color: C.amber, fontSize: "0.68rem", lineHeight: 1.5, fontFamily: FONT_UI,
-              }}>
-                ⚠ Live orders will be placed on 100%-confluence SMC signals.
-                Verify position sizing and Oanda credentials before enabling.
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
-        <AnimatePresence>
-          {error && (
-            <motion.p
-              initial={{ opacity: 0, y: -4 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0 }}
-              style={{ marginTop: 8, fontSize: "0.68rem", color: C.red, fontFamily: FONT_UI }}
-            >
-              ✕ {error}
-            </motion.p>
-          )}
-        </AnimatePresence>
-      </div>
-    </motion.div>
-  );
-}
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  BybitAutoTradeNotice — shown in CRYPTO mode
-// ─────────────────────────────────────────────────────────────────────────────
-function BybitAutoTradeNotice() {
-  return (
-    <div style={{
-      borderRadius: 16,
-      border:       "1px solid rgba(0,180,200,0.2)",
-      background:   "rgba(0,180,200,0.05)",
-      padding:      "14px 16px",
-      display:      "flex",
-      alignItems:   "center",
-      gap:          12,
-    }}>
-      <div style={{
-        width: 36, height: 36, borderRadius: 10, flexShrink: 0,
-        display: "flex", alignItems: "center", justifyContent: "center",
-        fontSize: "1.1rem",
-        background: "rgba(0,180,200,0.1)",
-        border: "1px solid rgba(0,180,200,0.25)",
-      }}>₿</div>
-      <div>
-        <p style={{
-          color: "#00B4C8", fontSize: "0.82rem", fontWeight: 700,
-          margin: "0 0 2px", fontFamily: FONT_UI,
-        }}>
-          Bybit Auto-Trade
-        </p>
-        <p style={{ color: C.sub, fontSize: "0.68rem", margin: 0, fontFamily: FONT_UI }}>
-          Automated execution on Bybit — coming in next sprint.
-        </p>
-      </div>
-    </div>
-  );
-}
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  Shared helpers
-// ─────────────────────────────────────────────────────────────────────────────
 function TabLoading() {
   const { accent } = useTheme();
   return (
