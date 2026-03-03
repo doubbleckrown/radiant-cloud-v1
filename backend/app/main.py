@@ -152,7 +152,18 @@ _bybit_prices:         dict[str, float] = {}   # latest mark price
 _bybit_meta:           dict[str, dict]  = {}   # 24 h stats per symbol
 _bybit_signal_history: dict[str, list[dict]] = {sym: [] for sym in BYBIT_SYMBOLS}
 
-# ema_period=50  — fires meaningful signals on the ≤1000 candle window
+# ── Runtime-overridable risk % ────────────────────────────────────────────────
+# Updated by POST /api/settings/update so the frontend slider takes effect
+# immediately without requiring a server restart.
+# None = fall back to BOT_RISK_PCT from .env (default 10.0%).
+_runtime_risk_pct: float = -1.0   # -1 sentinel = "use .env"
+
+def _get_bot_risk_pct() -> float:
+    """Return effective risk fraction (0.0–1.0). Runtime value beats .env."""
+    if _runtime_risk_pct >= 0:
+        return _runtime_risk_pct / 100.0
+    return float(os.getenv("BOT_RISK_PCT", "10.0")) / 100.0
+
 # rr_ratio=3.0   — 1:3 risk-reward per product spec
 _bybit_engines: dict[str, SMCConfluenceEngine] = {
     sym: SMCConfluenceEngine(sym, ema_period=50, rr_ratio=3.0)
@@ -496,6 +507,38 @@ async def bybit_fetch_tickers(symbols: list[str]) -> dict[str, dict]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+#  Bybit V5 — HMAC-SHA256 signing helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+BYBIT_RECV_WINDOW = 5000   # ms
+
+def _bybit_sign_get(api_key: str, api_secret: str, params: dict) -> tuple:
+    """Sign a Bybit V5 GET request. Returns (params, headers)."""
+    ts  = str(int(time.time() * 1000))
+    rw  = str(BYBIT_RECV_WINDOW)
+    qs  = urllib.parse.urlencode(sorted(params.items()))
+    sig = hmac.new(api_secret.encode(), (ts + api_key + rw + qs).encode(), hashlib.sha256).hexdigest()
+    return params, {
+        "X-BAPI-API-KEY": api_key, "X-BAPI-SIGN": sig,
+        "X-BAPI-TIMESTAMP": ts, "X-BAPI-RECV-WINDOW": rw,
+        "X-BAPI-SIGN-TYPE": "2", "Content-Type": "application/json",
+    }
+
+
+def _bybit_sign_post(api_key: str, api_secret: str, body: dict) -> tuple:
+    """Sign a Bybit V5 POST request. Returns (body, headers)."""
+    ts  = str(int(time.time() * 1000))
+    rw  = str(BYBIT_RECV_WINDOW)
+    jb  = json.dumps(body, separators=(",", ":"))
+    sig = hmac.new(api_secret.encode(), (ts + api_key + rw + jb).encode(), hashlib.sha256).hexdigest()
+    return body, {
+        "X-BAPI-API-KEY": api_key, "X-BAPI-SIGN": sig,
+        "X-BAPI-TIMESTAMP": ts, "X-BAPI-RECV-WINDOW": rw,
+        "X-BAPI-SIGN-TYPE": "2", "Content-Type": "application/json",
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 #  Bybit V5 — private account helpers (HMAC auth required)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -791,8 +834,17 @@ async def _bybit_auto_execute(sym: str, sig_dict: dict, signal) -> None:
 
         leverage    = BYBIT_DEFAULT_LEVERAGE
         margin_type = BYBIT_MARGIN_TYPE
-        risk_pct    = float(os.getenv("BOT_RISK_PCT", "2.0")) / 100.0
+        risk_pct    = _get_bot_risk_pct()
         risk_usd    = equity * risk_pct
+
+        # ── Floor: Bybit requires at least ~$1.20 initial margin per order ──
+        BYBIT_MIN_MARGIN = 1.20
+        if risk_usd < BYBIT_MIN_MARGIN:
+            logger.info(
+                "AutoExec BYBIT: risk_usd=%.4f < floor %.2f — using floor",
+                risk_usd, BYBIT_MIN_MARGIN,
+            )
+            risk_usd = BYBIT_MIN_MARGIN
 
         entry   = signal.entry_price
         sl      = signal.stop_loss
@@ -1016,12 +1068,17 @@ async def _oanda_auto_execute(ins: str, sig_dict: dict, signal) -> None:
 
     try:
         summary  = await fetch_account_summary(api_key, account_id)
-        nav      = float(summary.get("account", {}).get("NAV", 0) or 0)
+        # fetch_account_summary already unwraps resp.json()["account"],
+        # so NAV is top-level — do NOT double-nest under ["account"]
+        nav      = float(summary.get("NAV", 0) or 0)
         if nav <= 0:
-            logger.warning("AutoExec OANDA: zero NAV — skip %s", ins)
+            logger.warning(
+                "AutoExec OANDA: zero NAV for %s — account keys: %s",
+                ins, list(summary.keys())[:10],
+            )
             return
 
-        risk_pct = float(os.getenv("BOT_RISK_PCT", "1.0")) / 100.0
+        risk_pct = _get_bot_risk_pct()
         risk_usd = nav * risk_pct
         entry    = signal.entry_price
         sl       = signal.stop_loss
@@ -1198,11 +1255,43 @@ async def lifespan(app: FastAPI):
     logger.info("  BYBIT_API_SECRET  : %s",
                 "✅ set" if BYBIT_API_SECRET else "❌ MISSING — Bybit orders won't execute")
     logger.info("  BOT_RISK_PCT      : %s%%",
-                os.environ.get("BOT_RISK_PCT", "1.0"))
+                os.environ.get("BOT_RISK_PCT", "10.0"))
     logger.info("  BYBIT_LEVERAGE    : %d×  (%s margin)",
                 BYBIT_DEFAULT_LEVERAGE, BYBIT_MARGIN_TYPE)
     logger.info("  Clerk keys cached : %d", len(_clerk_jwks))
     logger.info("━" * 60)
+
+    # ── Startup NAV probe — logs Oanda account balance for .env validation ──
+    _oanda_creds = _get_oanda_creds()
+    if _oanda_creds:
+        try:
+            _acct = await asyncio.wait_for(
+                fetch_account_summary(*_oanda_creds), timeout=10.0,
+            )
+            _nav = float(_acct.get("NAV", 0) or 0)
+            logger.info(
+                "Oanda startup probe — NAV=%.2f  balance=%.2f  openTrades=%s  id=%s  env_account=%s",
+                _nav,
+                float(_acct.get("balance", 0) or 0),
+                _acct.get("openTradeCount", "?"),
+                _acct.get("id", "?"),
+                os.getenv("OANDA_ACCOUNT_ID", "NOT_SET"),
+            )
+            if _nav <= 0:
+                logger.warning(
+                    "⚠️  Oanda NAV=0 — full account_details keys: %s | "
+                    "Check that OANDA_ACCOUNT_ID matches your broker environment "
+                    "(practice vs live). Full dump: %s",
+                    list(_acct.keys()),
+                    {k: v for k, v in _acct.items() if k in (
+                        "id", "currency", "balance", "NAV", "unrealizedPL",
+                        "marginUsed", "marginAvailable", "positionValue",
+                    )},
+                )
+        except Exception as _exc:
+            logger.warning("Oanda startup probe FAILED: %s — check OANDA_ACCOUNT_ID environment", _exc)
+    else:
+        logger.info("Oanda startup probe: skipped (OANDA_API_KEY / OANDA_ACCOUNT_ID not set)")
 
     # ── Seed Oanda candles ───────────────────────────────────────────────────
     async def _safe_oanda_seed(ins: str, gran: str):
@@ -1683,6 +1772,35 @@ async def websocket_endpoint(ws: WebSocket, token: str = ""):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+#  Bot Settings  (live runtime update — no restart)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class BotSettingsRequest(BaseModel):
+    risk_pct: float | None = None   # 1.0 – 20.0
+
+
+@app.post("/api/settings/update")
+async def update_bot_settings(
+    body: BotSettingsRequest,
+    _: dict = Depends(get_current_user),
+):
+    """Update bot execution parameters at runtime without restart."""
+    global _runtime_risk_pct
+    changed = {}
+    if body.risk_pct is not None:
+        clamped = max(1.0, min(20.0, float(body.risk_pct)))
+        _runtime_risk_pct = clamped
+        changed["risk_pct"] = clamped
+        logger.info("Bot risk updated -> %.1f%%", clamped)
+    return {
+        "ok": True,
+        "changed": changed,
+        "effective_risk_pct": _runtime_risk_pct if _runtime_risk_pct >= 0
+                              else float(os.getenv("BOT_RISK_PCT", "10.0")),
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 #  Health
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1690,7 +1808,7 @@ async def websocket_endpoint(ws: WebSocket, token: str = ""):
 async def health():
     return {
         "status":               "ok",
-        "version":              "3.0.0",
+        "version":              "3.1.0",
         "auth":                 "clerk",
         "jwks_keys":            len(_clerk_jwks),
         "ws_clients":           len(_ws_clients),
@@ -1699,6 +1817,9 @@ async def health():
         "bybit_signals_total":  sum(len(v) for v in _bybit_signal_history.values()),
         "trade_locks":          len(_trade_tracker.all_locks()),
         "oanda_executor":       "READY" if _get_oanda_creds() else "NO_CREDS",
+        "bybit_executor":       "READY" if _get_bybit_creds() else "NO_CREDS",
+        "effective_risk_pct":   _runtime_risk_pct if _runtime_risk_pct >= 0
+                                else float(os.getenv("BOT_RISK_PCT", "10.0")),
         "bybit_executor":       "READY" if _get_bybit_creds() else "NO_CREDS",
         "timestamp":            int(time.time()),
     }

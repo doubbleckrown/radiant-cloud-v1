@@ -33,8 +33,8 @@ const _persistMode = (mode) => {
     localStorage.setItem("fx-radiant-app-mode", mode);
     const isCrypto = mode === "CRYPTO";
     const r = document.documentElement;
-    r.style.setProperty("--accent",     isCrypto ? "#FFA500"              : "#00FF41");
-    r.style.setProperty("--accent-hdr", isCrypto ? "rgba(255,165,0,0.08)" : "rgba(0,255,65,0.08)");
+    r.style.setProperty("--accent",     isCrypto ? "#FF9900"              : "#00FF41");
+    r.style.setProperty("--accent-hdr", isCrypto ? "rgba(255,153,0,0.08)" : "rgba(0,255,65,0.08)");
     r.setAttribute("data-mode", isCrypto ? "CRYPTO" : "FOREX");
   } catch { /* storage unavailable */ }
 };

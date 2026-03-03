@@ -214,7 +214,7 @@ export default function SignalsPage() {
               </span>
             </div>
             <p style={{ color: C.sub, fontSize: "0.62rem", margin: "4px 0 0", fontFamily: FONT_MONO }}>
-              {isCrypto ? "Bybit Linear · SMC 1:3 RR · 20× Isolated" : "Oanda v20 · SMC 1:3 RR · Max Margin"}
+              {isCrypto ? "Bybit Linear · SMC 1:3 RR · 20× Isolated" : "Oanda v20 · SMC 1:2 RR · Max Margin"}
               {lastUpdate && ` · ${fmtAgo(lastUpdate / 1000)}`}
             </p>
           </div>
@@ -405,46 +405,54 @@ function SignalCard({ sig, locked, isActive, isCrypto, accent, accentDim, accent
 
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-            <span style={{ color: C.white, fontSize: "0.92rem", fontWeight: 700, fontFamily: FONT_MONO }}>
+            <span style={{
+              color: C.white, fontSize: "1.1rem", fontWeight: 700, fontFamily: FONT_MONO,
+              textShadow: "0 0 8px rgba(255,255,255,0.15)",
+            }}>
               {sym}
             </span>
             <span style={{
-              fontSize: "0.58rem", fontWeight: 800, letterSpacing: "0.1em",
-              padding: "2px 7px", borderRadius: 5,
+              fontSize: "0.7rem", fontWeight: 800, letterSpacing: "0.1em",
+              padding: "3px 9px", borderRadius: 6,
               background: `${dirColor}18`, border: `1px solid ${dirColor}40`,
               color: dirColor, fontFamily: FONT_MONO,
+              filter: `drop-shadow(0 0 8px ${dirColor}cc)`,
             }}>
-              {sig.direction}
+              {isLong ? "BULLISH" : "BEARISH"}
             </span>
             {locked && (
               <span style={{
-                fontSize: "0.52rem", fontWeight: 700, padding: "2px 7px", borderRadius: 5,
+                fontSize: "0.62rem", fontWeight: 700, padding: "3px 9px", borderRadius: 6,
                 background: "rgba(255,165,0,0.12)", border: "1px solid rgba(255,165,0,0.3)",
                 color: "#FFA500", fontFamily: FONT_MONO,
               }}>🔒 POSITION OPEN</span>
             )}
             {wasExec && !locked && (
               <span style={{
-                fontSize: "0.52rem", fontWeight: 700, padding: "2px 7px", borderRadius: 5,
+                fontSize: "0.62rem", fontWeight: 700, padding: "3px 9px", borderRadius: 6,
                 background: `${accent}10`, border: `1px solid ${accent}28`,
                 color: accent, fontFamily: FONT_MONO,
+                filter: `drop-shadow(0 0 6px ${accent}99)`,
               }}>✓ BOT EXECUTED</span>
             )}
           </div>
-          <p style={{ color: C.sub, fontSize: "0.6rem", margin: "3px 0 0", fontFamily: FONT_MONO }}>
+          <p style={{ color: C.sub, fontSize: "0.72rem", margin: "3px 0 0", fontFamily: FONT_MONO }}>
             {fmtDate(sig.timestamp)} · {fmtTime(sig.timestamp)} · {fmtAgo(sig.timestamp)}
           </p>
         </div>
 
         <div style={{ textAlign: "right", flexShrink: 0 }}>
           <motion.p
-            animate={{ color: confColor, textShadow: conf >= 100 ? `0 0 10px ${confColor}` : "none" }}
+            animate={{
+              color: confColor,
+              textShadow: conf >= 100 ? `0 0 12px ${confColor}, 0 0 24px ${confColor}80` : "none",
+            }}
             transition={{ duration: 0.3 }}
-            style={{ fontSize: "1.2rem", fontWeight: 800, fontFamily: FONT_MONO, margin: 0 }}
+            style={{ fontSize: "1.44rem", fontWeight: 800, fontFamily: FONT_MONO, margin: 0 }}
           >
             {conf}%
           </motion.p>
-          <p style={{ color: C.sub, fontSize: "0.52rem", margin: "2px 0 0", letterSpacing: "0.06em" }}>
+          <p style={{ color: C.sub, fontSize: "0.62rem", margin: "2px 0 0", letterSpacing: "0.06em" }}>
             CONFLUENCE
           </p>
         </div>
@@ -469,8 +477,8 @@ function SignalCard({ sig, locked, isActive, isCrypto, accent, accentDim, accent
             textAlign: "center", padding: "10px 8px",
             borderRight: i < 2 ? `1px solid ${C.cardBdr}` : "none",
           }}>
-            <p style={{ color: C.sub, fontSize: "0.52rem", letterSpacing: "0.1em", margin: "0 0 3px", fontFamily: FONT_UI }}>{label}</p>
-            <p style={{ color, fontSize: "0.75rem", fontWeight: 600, margin: 0, fontFamily: FONT_MONO }}>{value}</p>
+            <p style={{ color: C.sub, fontSize: "0.62rem", letterSpacing: "0.1em", margin: "0 0 3px", fontFamily: FONT_UI }}>{label}</p>
+            <p style={{ color, fontSize: "0.9rem", fontWeight: 600, margin: 0, fontFamily: FONT_MONO }}>{value}</p>
           </div>
         ))}
       </div>
@@ -493,7 +501,7 @@ function SignalCard({ sig, locked, isActive, isCrypto, accent, accentDim, accent
               </div>
               <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                 <DetailRow label="Breakeven"   value={fmtPrice(sig.breakeven, dp)} mono />
-                <DetailRow label="Risk/Reward" value={`1 : ${sig.rr ?? (isCrypto ? "3.0" : "3.0")}`} mono />
+                <DetailRow label="Risk/Reward" value={`1 : ${sig.rr ?? (isCrypto ? "3.0" : "2.0")}`} mono />
                 <DetailRow label="Engine"      value={isCrypto ? "Bybit Linear · 20× Isolated" : "Oanda v20 · Max Margin"} />
                 {locked && (
                   <div style={{

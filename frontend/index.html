@@ -15,15 +15,15 @@
     on page refresh when the user is in CRYPTO mode.
 
     FOREX  → #00FF41  (Radiant Green)
-    CRYPTO → #00B4C8  (MEXC Teal)
+    CRYPTO → #FF9900  (Bybit Orange)
   -->
   <script>
     (function () {
       try {
         var m = localStorage.getItem('fx-radiant-app-mode');
         var isCrypto  = m === 'CRYPTO';
-        var accent    = isCrypto ? '#00B4C8'              : '#00FF41';
-        var accentHdr = isCrypto ? 'rgba(0,180,200,0.08)' : 'rgba(0,255,65,0.08)';
+        var accent    = isCrypto ? '#FF9900'              : '#00FF41';
+        var accentHdr = isCrypto ? 'rgba(255,153,0,0.08)' : 'rgba(0,255,65,0.08)';
         var r = document.documentElement;
         r.style.setProperty('--accent',     accent);
         r.style.setProperty('--accent-hdr', accentHdr);

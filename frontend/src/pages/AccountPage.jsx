@@ -25,7 +25,6 @@ import { motion, AnimatePresence }           from "framer-motion";
 import api                                   from "../utils/api";
 import { useAuthStore }                      from "../store/authStore";
 import { useTheme }                          from "../hooks/useTheme";
-import { useUser }                           from "@clerk/clerk-react";
 
 // ── Non-accent colour tokens (same in both modes) ─────────────────────────────
 const C = {
@@ -51,7 +50,7 @@ const BYBIT_HEADERS = { "X-App-Mode": "CRYPTO" };
 
 // ═════════════════════════════════════════════════════════════════════════════
 export default function AccountPage() {
-  const { user: clerkUser } = useUser();
+  // Private Bot Mode: credentials are .env-only — no per-user credential fetch
   const { isCrypto, accent, accentDim, accentBdr } = useTheme();
   // authStore: mode only in private bot mode
 
@@ -74,7 +73,7 @@ export default function AccountPage() {
   const [bybitSparkline, setBybitSparkline] = useState([]);
 
   // ── Init ──────────────────────────────────────────────────────────────────
-  useEffect(() => { fetchMe(); }, []); // eslint-disable-line
+  // No fetchMe needed — Private Bot Mode uses .env credentials only
 
   // ── OANDA: eagerly load history for the header sparkline (FOREX) ──────────
   useEffect(() => {

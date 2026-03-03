@@ -377,13 +377,15 @@ export default function MarketsPage() {
 // ── ConfBadge ─────────────────────────────────────────────────────────────────
 function ConfBadge({ conf, bias, accent }) {
   const color = conf >= 100 ? accent : conf >= 80 ? C.amber : C.sub;
+  const biasLabel = bias === "LONG" ? "BULLISH" : bias === "SHORT" ? "BEARISH" : bias === "NEUTRAL" ? "" : bias;
   return (
     <span style={{
-      fontSize: "0.55rem", fontWeight: 700, padding: "1px 6px", borderRadius: 5,
+      fontSize: "0.6rem", fontWeight: 700, padding: "2px 7px", borderRadius: 5,
       background: `${color}12`, border: `1px solid ${color}28`,
       color, fontFamily: FONT_MONO, letterSpacing: "0.06em",
+      filter: conf >= 100 ? `drop-shadow(0 0 6px ${color}cc)` : "none",
     }}>
-      {conf}% {bias !== "NEUTRAL" ? bias.substring(0, 4) : ""}
+      {conf}% {biasLabel}
     </span>
   );
 }

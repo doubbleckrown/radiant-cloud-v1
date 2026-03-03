@@ -16,6 +16,7 @@
  */
 import { useState, useCallback, useEffect } from "react";
 import { motion, AnimatePresence }            from "framer-motion";
+import api                                    from "../utils/api";
 import { useAuthStore }                       from "../store/authStore";
 import { useTheme }                           from "../hooks/useTheme";
 import { useUser, useClerk }                  from "@clerk/clerk-react";
@@ -82,11 +83,8 @@ function ensureRangeStyles() {
 export default function ProfilePage() {
   const { user: clerkUser } = useUser();
   const { signOut }         = useClerk();
-  const {
-    auto_trade_enabled, risk_pct,
-    oanda_key_hint, oanda_account_id,
-    updateSettings,
-  } = useAuthStore();
+  // Private Bot Mode: authStore only exposes appMode — no credentials or settings
+  const { toggleAppMode }   = useAuthStore();
   const { isCrypto, accent, accentDim, accentBdr } = useTheme();
 
   // Ensure range-thumb CSS is injected once
@@ -97,27 +95,51 @@ export default function ProfilePage() {
     : (clerkUser?.username ?? "Trader");
 
   const user = {
-    name:              displayName,
-    email:             clerkUser?.primaryEmailAddress?.emailAddress ?? "",
-    auto_trade:        auto_trade_enabled ?? false,
-    risk_pct:          risk_pct           ?? 1.0,
-    oanda_key_hint:    oanda_key_hint      ?? "",
-    oanda_account_id:  oanda_account_id    ?? "",
-
-
+    name:  displayName,
+    email: clerkUser?.primaryEmailAddress?.emailAddress ?? "",
   };
 
   // ── Editing state ─────────────────────────────────────────────────────────
   const [editing,   setEditing]   = useState(null);
   const [draftName, setDraftName] = useState("");
-  const [draftRisk, setDraftRisk] = useState(1.0);
+  // Risk slider — live synced to backend via POST /api/settings/update
+  const [draftRisk,    setDraftRisk]    = useState(10.0);  // default 10%
+  const [riskSyncing,  setRiskSyncing]  = useState(false);
+  const [riskSynced,   setRiskSynced]   = useState(false);
+  const [riskError,    setRiskError]    = useState(null);
   const [saving,    setSaving]    = useState(null);
   const [saveError, setSaveError] = useState(null);
+
+  // Load effective risk from backend on mount
+  useEffect(() => {
+    api.get("/health").then(({ data }) => {
+      if (data?.effective_risk_pct != null) {
+        setDraftRisk(parseFloat(data.effective_risk_pct));
+      }
+    }).catch(() => {});
+  }, []);
+
+  // Debounced risk sync to backend
+  useEffect(() => {
+    const t = setTimeout(async () => {
+      setRiskSyncing(true);
+      setRiskError(null);
+      try {
+        await api.post("/settings/update", { risk_pct: parseFloat(draftRisk) });
+        setRiskSynced(true);
+        setTimeout(() => setRiskSynced(false), 2000);
+      } catch (e) {
+        setRiskError("Sync failed");
+      } finally {
+        setRiskSyncing(false);
+      }
+    }, 600);
+    return () => clearTimeout(t);
+  }, [draftRisk]);
 
   const openEdit = useCallback((field) => {
     setSaveError(null);
     if (field === "name") setDraftName(user.name);
-    if (field === "risk") setDraftRisk(user.risk_pct);
     setEditing(field);
   }, [user]);
 
@@ -127,21 +149,18 @@ export default function ProfilePage() {
   }, []);
 
   const commit = useCallback(async (field) => {
+    if (field === "risk") { setEditing(null); return; } // risk auto-syncs via useEffect
     setSaving(field);
     setSaveError(null);
     try {
-      const patch =
-        field === "name" ? { display_name: draftName.trim() }  :
-        field === "risk" ? { risk_pct: parseFloat(draftRisk) } : {};
-      if (!Object.keys(patch).length) return;
-      await updateSettings(patch);
+      // Only name edit supported via Clerk — no backend settings call needed for name
       setEditing(null);
     } catch (err) {
       setSaveError(err?.response?.data?.detail ?? "Save failed — try again");
     } finally {
       setSaving(null);
     }
-  }, [draftName, draftRisk, updateSettings]);
+  }, []);
 
   return (
     <div style={{ fontFamily: FONT_UI, color: C.white, minHeight: "100%" }}>
@@ -267,6 +286,45 @@ export default function ProfilePage() {
 
         {/* ── Bot Status (replaces credential forms in Private Bot Mode) ──── */}
         <BotStatusSection isCrypto={isCrypto} accent={accent} accentDim={accentDim} accentBdr={accentBdr} />
+
+        {/* ── Risk Settings ────────────────────────────────────────────────── */}
+        <Section label="Risk Settings">
+          <div style={{ padding: "4px 0" }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+              <div>
+                <p style={{ color: C.white, fontSize: "0.85rem", fontWeight: 600, margin: 0 }}>
+                  Risk Per Trade
+                </p>
+                <p style={{ color: C.sub, fontSize: "0.7rem", margin: "3px 0 0" }}>
+                  % of account equity per auto-executed signal
+                </p>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <span style={{
+                  fontFamily: FONT_MONO, fontSize: "1.1rem", fontWeight: 700,
+                  color: accent,
+                  textShadow: `0 0 10px ${accent}80`,
+                }}>
+                  {parseFloat(draftRisk).toFixed(1)}%
+                </span>
+                {riskSyncing && (
+                  <span style={{ fontSize: "0.6rem", color: C.sub }}>syncing…</span>
+                )}
+                {riskSynced && !riskSyncing && (
+                  <span style={{ fontSize: "0.6rem", color: C.green }}>✓ saved</span>
+                )}
+                {riskError && (
+                  <span style={{ fontSize: "0.6rem", color: C.red }}>{riskError}</span>
+                )}
+              </div>
+            </div>
+            <RiskSlider value={draftRisk} onChange={setDraftRisk} accent={accent} />
+            <p style={{ color: C.sub, fontSize: "0.65rem", marginTop: 8 }}>
+              Each trade risks {parseFloat(draftRisk).toFixed(1)}% of account equity.
+              Changes sync to the bot immediately — no restart required.
+            </p>
+          </div>
+        </Section>
 
                 {/* ── Section 4: Security ──────────────────────────────────────────── */}
         <Section label="Security">
@@ -1244,25 +1302,14 @@ function BybitTradingSettings({ marginType: initMarginType, leverage: initLevera
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ─────────────────────────────────────────────────────────────────────────────
-function RiskSlider({ value, onChange }) {
-  const { accent } = useTheme();
-  const pct   = ((value - 0.1) / (10.0 - 0.1)) * 100;
-  const color = value <= 2.0 ? accent : value <= 5.0 ? C.amber : C.red;
+function RiskSlider({ value, onChange, accent: accentProp }) {
+  const { accent: themeAccent } = useTheme();
+  const accent = accentProp ?? themeAccent;
+  const pct   = ((value - 1.0) / (20.0 - 1.0)) * 100;
+  const color = value <= 5.0 ? accent : value <= 10.0 ? C.amber : C.red;
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-      <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between" }}>
-        <span style={{ color, fontSize: "1.6rem", fontWeight: 700, fontFamily: FONT_MONO, textShadow: `0 0 10px ${color}55` }}>
-          {parseFloat(value).toFixed(1)}%
-        </span>
-        <span style={{
-          fontSize: "0.62rem", fontWeight: 600, letterSpacing: "0.08em",
-          padding: "3px 8px", borderRadius: 6,
-          background: `${color}12`, border: `1px solid ${color}30`, color, fontFamily: FONT_UI,
-        }}>
-          {riskLabel(value)}
-        </span>
-      </div>
+    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
       <div style={{ position: "relative" }}>
         <div style={{
           position: "absolute", top: "50%", left: 0, height: 6, borderRadius: 3, pointerEvents: "none",
@@ -1271,7 +1318,7 @@ function RiskSlider({ value, onChange }) {
           boxShadow: `0 0 6px ${color}55`, transition: "width 0.05s, background 0.4s",
         }} />
         <input
-          type="range" min="0.1" max="10.0" step="0.1" value={value}
+          type="range" min="1" max="20" step="0.5" value={value}
           onChange={e => onChange(parseFloat(e.target.value))}
           style={{
             WebkitAppearance: "none", appearance: "none",
@@ -1282,15 +1329,7 @@ function RiskSlider({ value, onChange }) {
         />
       </div>
       <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.58rem", color: C.sub, fontFamily: FONT_MONO }}>
-        <span>0.1%</span><span>2.5%</span><span>5%</span><span>7.5%</span><span>10%</span>
-      </div>
-      <div style={{
-        padding: "8px 10px", borderRadius: 8,
-        background: "rgba(0,0,0,0.35)", border: `1px solid ${C.cardBdr}`,
-        color: C.sub, fontSize: "0.68rem", lineHeight: 1.5,
-      }}>
-        Each trade risks {parseFloat(value).toFixed(1)}% of account.
-        At $10,000 that is ${(10000 * value / 100).toFixed(0)} per trade.
+        <span>1%</span><span>5%</span><span>10%</span><span>15%</span><span>20%</span>
       </div>
     </div>
   );
@@ -1298,8 +1337,8 @@ function RiskSlider({ value, onChange }) {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function riskLabel(pct) {
-  if (pct <= 1.0) return "Conservative";
-  if (pct <= 2.0) return "Standard";
-  if (pct <= 4.0) return "Aggressive";
+  if (pct <= 3.0)  return "Conservative";
+  if (pct <= 7.0)  return "Standard";
+  if (pct <= 12.0) return "Aggressive";
   return "High Risk";
 }
