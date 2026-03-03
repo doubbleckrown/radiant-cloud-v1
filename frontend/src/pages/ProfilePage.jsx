@@ -110,17 +110,33 @@ export default function ProfilePage() {
   const [saving,    setSaving]    = useState(null);
   const [saveError, setSaveError] = useState(null);
 
-  // Load effective risk from backend on mount
+  // ── Load authoritative risk from GET /api/settings on every mount ───────
+  // This is the fix for the "1% vs 10%" bug: React state resets on navigation,
+  // so we always pull the real value from the server, not the component default.
+  const [riskInitialised, setRiskInitialised] = useState(false);
+
   useEffect(() => {
-    api.get("/health").then(({ data }) => {
-      if (data?.effective_risk_pct != null) {
-        setDraftRisk(parseFloat(data.effective_risk_pct));
-      }
-    }).catch(() => {});
+    api.get("/settings")
+      .then(({ data }) => {
+        if (data?.risk_pct != null) {
+          setDraftRisk(parseFloat(data.risk_pct));
+        }
+      })
+      .catch(() => {
+        // Fallback: try /health if /settings isn't available yet
+        api.get("/health").then(({ data }) => {
+          if (data?.effective_risk_pct != null) {
+            setDraftRisk(parseFloat(data.effective_risk_pct));
+          }
+        }).catch(() => {});
+      })
+      .finally(() => setRiskInitialised(true));
   }, []);
 
-  // Debounced risk sync to backend
+  // ── Debounced risk sync — only fires AFTER initial load to prevent
+  // overwriting server value with the component default (10.0) on mount ───
   useEffect(() => {
+    if (!riskInitialised) return;   // ← key guard: don't fire before server value arrives
     const t = setTimeout(async () => {
       setRiskSyncing(true);
       setRiskError(null);
@@ -133,9 +149,9 @@ export default function ProfilePage() {
       } finally {
         setRiskSyncing(false);
       }
-    }, 600);
+    }, 800);
     return () => clearTimeout(t);
-  }, [draftRisk]);
+  }, [draftRisk, riskInitialised]);
 
   const openEdit = useCallback((field) => {
     setSaveError(null);

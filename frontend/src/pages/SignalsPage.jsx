@@ -81,7 +81,17 @@ export default function SignalsPage() {
   const [loading,    setLoading]    = useState(true);
   const [error,      setError]      = useState(null);
   const [lastUpdate, setLastUpdate] = useState(null);
+  // Bot risk shown in header — pulled from server to stay in sync with ProfilePage
+  const [botRisk,    setBotRisk]    = useState(null);
   const pollRef = useRef(null);
+
+  // ── Pull authoritative risk % from server on every mount/mode switch ──────
+  // Prevents UI from showing a stale value after navigating away & back.
+  useEffect(() => {
+    api.get("/settings")
+      .then(({ data }) => { if (data?.risk_pct != null) setBotRisk(data.risk_pct); })
+      .catch(() => {});
+  }, [isCrypto]);
 
   // ── WebSocket for live Oanda signals (FOREX mode) ─────────────────────────
   const { lastMessage } = useWebSocket(isCrypto ? null : "/ws");
@@ -214,7 +224,12 @@ export default function SignalsPage() {
               </span>
             </div>
             <p style={{ color: C.sub, fontSize: "0.62rem", margin: "4px 0 0", fontFamily: FONT_MONO }}>
-              {isCrypto ? "Bybit Linear · SMC 1:3 RR · 20× Isolated" : "Oanda v20 · SMC 1:2 RR · Max Margin"}
+              {isCrypto ? "Bybit Linear · SMC 1:3 RR · 20× Isolated" : "Oanda v20 · SMC 1:3 RR · Precision Sizing"}
+              {botRisk != null && (
+                <span style={{ color: accent, marginLeft: 6 }}>
+                  · Risk {parseFloat(botRisk).toFixed(1)}%
+                </span>
+              )}
               {lastUpdate && ` · ${fmtAgo(lastUpdate / 1000)}`}
             </p>
           </div>

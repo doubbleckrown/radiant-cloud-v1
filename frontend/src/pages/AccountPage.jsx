@@ -176,7 +176,8 @@ export default function AccountPage() {
       setBybitAccount(data ?? {});
       mark("Summary", false);
     } catch (e) {
-      mark("Summary", false, e.userMessage ?? "Could not load Bybit account");
+      const detail = e?.response?.data?.detail ?? e?.message ?? "Unknown error";
+      mark("Summary", false, `Bybit API Unavailable — ${detail}`);
     }
   }, []);
 
@@ -187,7 +188,8 @@ export default function AccountPage() {
       setBybitPositions(Array.isArray(data) ? data : []);
       mark("Open Trades", false);
     } catch (e) {
-      mark("Open Trades", false, e.userMessage ?? "Could not load Bybit positions");
+      const detail = e?.response?.data?.detail ?? e?.message ?? "Unknown error";
+      mark("Open Trades", false, `Bybit API Unavailable — ${detail}`);
     }
   }, []);
 
@@ -198,7 +200,8 @@ export default function AccountPage() {
       setBybitHistory(Array.isArray(data) ? data : []);
       mark("History", false);
     } catch (e) {
-      mark("History", false, e.userMessage ?? "Could not load Bybit history");
+      const detail = e?.response?.data?.detail ?? e?.message ?? "Unknown error";
+      mark("History", false, `Bybit API Unavailable — ${detail}`);
     }
   }, []);
 

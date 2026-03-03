@@ -155,17 +155,51 @@ _bybit_prices:         dict[str, float] = {}   # latest mark price
 _bybit_meta:           dict[str, dict]  = {}   # 24 h stats per symbol
 _bybit_signal_history: dict[str, list[dict]] = {sym: [] for sym in BYBIT_SYMBOLS}
 
+# ── Settings file — persists risk_pct across server restarts ─────────────────
+# Stored next to main.py as "settings.json".  Written on every update.
+# On startup, loaded BEFORE the .env fallback so the last slider value wins.
+_SETTINGS_PATH = Path(__file__).resolve().parent / "settings.json"
+
+def _load_settings() -> dict:
+    """Load settings.json from disk; return {} on missing/corrupt file."""
+    try:
+        if _SETTINGS_PATH.exists():
+            with open(_SETTINGS_PATH, "r") as f:
+                return json.load(f)
+    except Exception as exc:
+        logger.warning("settings.json load failed: %s", exc)
+    return {}
+
+def _save_settings(data: dict) -> None:
+    """Atomically write settings to disk."""
+    try:
+        tmp = _SETTINGS_PATH.with_suffix(".json.tmp")
+        with open(tmp, "w") as f:
+            json.dump(data, f, indent=2)
+        tmp.replace(_SETTINGS_PATH)
+        logger.debug("settings.json saved: %s", data)
+    except Exception as exc:
+        logger.warning("settings.json save failed: %s", exc)
+
 # ── Runtime-overridable risk % ────────────────────────────────────────────────
-# Updated by POST /api/settings/update so the frontend slider takes effect
-# immediately without requiring a server restart.
-# None = fall back to BOT_RISK_PCT from .env (default 10.0%).
-_runtime_risk_pct: float = -1.0   # -1 sentinel = "use .env"
+# Priority (highest → lowest):
+#   1. _runtime_risk_pct  — set by POST /api/settings/update (in-memory, persisted to settings.json)
+#   2. settings.json      — last value saved across restarts
+#   3. BOT_RISK_PCT .env  — initial default (default 10.0)
+_saved_settings   = _load_settings()
+_runtime_risk_pct: float = float(_saved_settings.get("risk_pct", -1.0))
 
 def _get_bot_risk_pct() -> float:
-    """Return effective risk fraction (0.0–1.0). Runtime value beats .env."""
+    """Return effective risk fraction (0.0–1.0). Runtime > settings.json > .env."""
     if _runtime_risk_pct >= 0:
         return _runtime_risk_pct / 100.0
     return float(os.getenv("BOT_RISK_PCT", "10.0")) / 100.0
+
+def _effective_risk_pct_display() -> float:
+    """Return the display value (percentage, not fraction) for API responses."""
+    if _runtime_risk_pct >= 0:
+        return _runtime_risk_pct
+    return float(os.getenv("BOT_RISK_PCT", "10.0"))
 
 # rr_ratio=3.0   — 1:3 risk-reward per product spec
 _bybit_engines: dict[str, SMCConfluenceEngine] = {
@@ -1343,6 +1377,77 @@ async def price_stream_loop() -> None:
 #  App lifecycle
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ─────────────────────────────────────────────────────────────────────────────
+#  Trade Reconciliation Loop
+#
+#  Problem: TradeTracker locks an instrument the moment an order is placed.
+#  If the order is rejected, partially filled, or manually closed outside the
+#  bot, the lock remains and the bot never re-enters — a "ghost trade" bug.
+#
+#  Solution: Every 5 minutes, cross-reference locked instruments/symbols
+#  against the LIVE open positions from Oanda and Bybit.  Any lock that
+#  has no corresponding live position is automatically released so the SMC
+#  engine can find a fresh setup on the next candle refresh.
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def trade_reconciliation_loop() -> None:
+    """
+    Periodically reconcile TradeTracker locks with live broker positions.
+    Runs every 5 minutes.  If a locked instrument has no live open position,
+    the lock is released ('ghost trade' fix).
+    """
+    RECON_INTERVAL = 300   # 5 minutes
+    await asyncio.sleep(60)  # initial delay — let signal loops start first
+
+    while True:
+        try:
+            locks = _trade_tracker.all_locks()
+            if not locks:
+                await asyncio.sleep(RECON_INTERVAL)
+                continue
+
+            # ── Oanda reconciliation ─────────────────────────────────────
+            oanda_creds = _get_oanda_creds()
+            if oanda_creds:
+                try:
+                    live_trades   = await fetch_open_trades(*oanda_creds)
+                    live_oanda    = {t.get("instrument", "") for t in live_trades}
+                    oanda_locked  = [s for s in locks if "_" in s and not s.endswith("USDT")]
+                    for ins in oanda_locked:
+                        if ins not in live_oanda:
+                            _trade_tracker.unlock(ins)
+                            logger.warning(
+                                "🔓 Reconciliation: Oanda lock RELEASED for %s "
+                                "(no live position found — ghost trade removed)",
+                                ins,
+                            )
+                except Exception as exc:
+                    logger.debug("Reconciliation Oanda probe failed: %s", exc)
+
+            # ── Bybit reconciliation ─────────────────────────────────────
+            bybit_creds = _get_bybit_creds()
+            if bybit_creds:
+                try:
+                    live_positions = await bybit_fetch_positions(*bybit_creds)
+                    live_bybit     = {p.get("symbol", "") for p in live_positions}
+                    bybit_locked   = [s for s in locks if s.endswith("USDT")]
+                    for sym in bybit_locked:
+                        if sym not in live_bybit:
+                            _trade_tracker.unlock(sym)
+                            logger.warning(
+                                "🔓 Reconciliation: Bybit lock RELEASED for %s "
+                                "(no live position found — ghost trade removed)",
+                                sym,
+                            )
+                except Exception as exc:
+                    logger.debug("Reconciliation Bybit probe failed: %s", exc)
+
+        except Exception as loop_exc:
+            logger.error("trade_reconciliation_loop error: %s", loop_exc)
+
+        await asyncio.sleep(RECON_INTERVAL)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("━" * 60)
@@ -1454,6 +1559,7 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(price_stream_loop())
     asyncio.create_task(candle_refresh_loop())
     asyncio.create_task(bybit_refresh_loop())
+    asyncio.create_task(trade_reconciliation_loop())
     yield
 
 
@@ -1951,11 +2057,28 @@ async def websocket_endpoint(ws: WebSocket, token: str = ""):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Bot Settings  (live runtime update — no restart)
+#  Bot Settings  (live runtime update — persisted to settings.json)
 # ─────────────────────────────────────────────────────────────────────────────
 
 class BotSettingsRequest(BaseModel):
     risk_pct: float | None = None   # 1.0 – 20.0
+
+
+@app.get("/api/settings")
+async def get_bot_settings(_: dict = Depends(get_current_user)):
+    """
+    Return current bot settings.  Frontend calls this on every page load
+    to guarantee the UI always reflects the actual backend value —
+    preventing the '1% vs 10%' stale-state bug where React resets the
+    slider to its initial state value after navigation.
+    """
+    return {
+        "risk_pct":          _effective_risk_pct_display(),
+        "rr_ratio":          3.0,
+        "bybit_leverage":    BYBIT_DEFAULT_LEVERAGE,
+        "bybit_margin_type": BYBIT_MARGIN_TYPE,
+        "source":            "settings.json" if _runtime_risk_pct >= 0 else "env",
+    }
 
 
 @app.post("/api/settings/update")
@@ -1963,19 +2086,25 @@ async def update_bot_settings(
     body: BotSettingsRequest,
     _: dict = Depends(get_current_user),
 ):
-    """Update bot execution parameters at runtime without restart."""
+    """
+    Update bot execution parameters at runtime without restart.
+    Changes are immediately written to settings.json so they survive
+    a server restart or process recycle.
+    """
     global _runtime_risk_pct
     changed = {}
     if body.risk_pct is not None:
         clamped = max(1.0, min(20.0, float(body.risk_pct)))
         _runtime_risk_pct = clamped
         changed["risk_pct"] = clamped
-        logger.info("Bot risk updated -> %.1f%%", clamped)
+        # ── Persist to disk so the value survives a restart ──────────────
+        _save_settings({"risk_pct": clamped})
+        logger.info("Bot risk updated -> %.1f%% (persisted to settings.json)", clamped)
     return {
         "ok": True,
         "changed": changed,
-        "effective_risk_pct": _runtime_risk_pct if _runtime_risk_pct >= 0
-                              else float(os.getenv("BOT_RISK_PCT", "10.0")),
+        "risk_pct": _effective_risk_pct_display(),
+        "source": "settings.json",
     }
 
 
@@ -1997,8 +2126,7 @@ async def health():
         "trade_locks":          len(_trade_tracker.all_locks()),
         "oanda_executor":       "READY" if _get_oanda_creds() else "NO_CREDS",
         "bybit_executor":       "READY" if _get_bybit_creds() else "NO_CREDS",
-        "effective_risk_pct":   _runtime_risk_pct if _runtime_risk_pct >= 0
-                                else float(os.getenv("BOT_RISK_PCT", "10.0")),
-        "bybit_executor":       "READY" if _get_bybit_creds() else "NO_CREDS",
+        "effective_risk_pct":   _effective_risk_pct_display(),
+        "settings_source":      "settings.json" if _runtime_risk_pct >= 0 else "env",
         "timestamp":            int(time.time()),
     }

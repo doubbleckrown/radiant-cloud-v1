@@ -379,7 +379,7 @@ def calculate_take_profit(
     direction: SignalDirection,
     entry: float,
     stop_loss: float,
-    rr_ratio: float = 2.0,
+    rr_ratio: float = 3.0,   # 1:3 Risk-Reward — TP = entry ± (SL_distance × 3)
 ) -> float:
     risk = abs(entry - stop_loss)
     if direction == SignalDirection.LONG:
@@ -403,7 +403,7 @@ class SMCConfluenceEngine:
         ema_period:   int   = 200,
         hysteresis:   float = 0.0001,
         swing_lb:     int   = 5,
-        rr_ratio:     float = 2.0,
+        rr_ratio:     float = 3.0,   # 1:3 RR — enforced globally, no Forex override
     ):
         self.instrument = instrument
         self.ema_period = ema_period

@@ -279,18 +279,46 @@ export default function MarketsPage() {
           const change24 = isCrypto ? (bybitMeta[instrument]?.change24h ?? null) : null;
           const isSelected = selectedInstrument === instrument;
 
+          // ── 100% Panic Glow — spec colours from design brief ────────────
+          const isPanic    = conf >= 100;
+          const isBull100  = isPanic && (bias === "LONG"  || bias === "BULLISH");
+          const isBear100  = isPanic && (bias === "SHORT" || bias === "BEARISH");
+          const panicGlow  = isBull100
+            ? "drop-shadow(0 0 15px #4ADE80) drop-shadow(0 0 6px #4ADE8060)"
+            : isBear100
+            ? "drop-shadow(0 0 15px #F87171) drop-shadow(0 0 6px #F8717160)"
+            : "none";
+          const panicBorder = isBull100
+            ? "1px solid rgba(74,222,128,0.55)"
+            : isBear100
+            ? "1px solid rgba(248,113,113,0.55)"
+            : isSelected ? `1px solid ${accentBdr}` : "1px solid transparent";
+
           return (
             <motion.div
               key={instrument}
               layout
               onClick={() => setSelectedInstrument(isSelected ? null : instrument)}
+              animate={{
+                filter:     panicGlow,
+                // Slow pulse only on panic-level confidence
+                boxShadow:  isPanic
+                  ? isBull100
+                    ? ["0 0 0px transparent", "0 0 24px #4ADE8040", "0 0 0px transparent"]
+                    : ["0 0 0px transparent", "0 0 24px #F8717140", "0 0 0px transparent"]
+                  : "0 0 0px transparent",
+              }}
+              transition={isPanic
+                ? { boxShadow: { duration: 1.8, repeat: Infinity, ease: "easeInOut" }, filter: { duration: 0.3 } }
+                : { duration: 0.3 }
+              }
               style={{
-                borderRadius:  14,
-                background:    isSelected ? accentDim : "transparent",
-                border:        `1px solid ${isSelected ? accentBdr : "transparent"}`,
-                cursor:        "pointer",
-                overflow:      "hidden",
-                transition:    "background 0.2s, border-color 0.2s",
+                borderRadius: 14,
+                background:   isSelected ? accentDim : "transparent",
+                border:       panicBorder,
+                cursor:       "pointer",
+                overflow:     "hidden",
+                transition:   "background 0.2s",
               }}
             >
               {/* ── Row ───────────────────────────────────────────────── */}
