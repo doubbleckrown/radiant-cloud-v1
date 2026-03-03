@@ -214,7 +214,7 @@ export default function SignalsPage() {
               </span>
             </div>
             <p style={{ color: C.sub, fontSize: "0.62rem", margin: "4px 0 0", fontFamily: FONT_MONO }}>
-              {isCrypto ? "Bybit Linear · SMC 1:3 RR · 20× Isolated" : "Oanda v20 · SMC 1:2 RR · Max Margin"}
+              {isCrypto ? "Bybit Linear · SMC 1:3 RR · 20× Isolated" : "Oanda v20 · SMC 1:3 RR · Max Margin"}
               {lastUpdate && ` · ${fmtAgo(lastUpdate / 1000)}`}
             </p>
           </div>
@@ -493,7 +493,7 @@ function SignalCard({ sig, locked, isActive, isCrypto, accent, accentDim, accent
               </div>
               <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                 <DetailRow label="Breakeven"   value={fmtPrice(sig.breakeven, dp)} mono />
-                <DetailRow label="Risk/Reward" value={`1 : ${sig.rr ?? (isCrypto ? "3.0" : "2.0")}`} mono />
+                <DetailRow label="Risk/Reward" value={`1 : ${sig.rr ?? (isCrypto ? "3.0" : "3.0")}`} mono />
                 <DetailRow label="Engine"      value={isCrypto ? "Bybit Linear · 20× Isolated" : "Oanda v20 · Max Margin"} />
                 {locked && (
                   <div style={{
