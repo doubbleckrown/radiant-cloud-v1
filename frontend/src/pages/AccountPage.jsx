@@ -176,7 +176,11 @@ export default function AccountPage() {
       setBybitAccount(data ?? {});
       mark("Summary", false);
     } catch (e) {
-      const detail = e?.response?.data?.detail ?? e?.message ?? "Unknown error";
+      const rawDetail = e?.response?.data?.detail;
+      const detail = typeof rawDetail === "string" ? rawDetail
+        : typeof rawDetail === "object" && rawDetail !== null
+          ? (rawDetail.detail ?? rawDetail.error ?? JSON.stringify(rawDetail))
+          : (e?.message ?? "Unknown error");
       mark("Summary", false, `Bybit API Unavailable — ${detail}`);
     }
   }, []);
@@ -188,7 +192,11 @@ export default function AccountPage() {
       setBybitPositions(Array.isArray(data) ? data : []);
       mark("Open Trades", false);
     } catch (e) {
-      const detail = e?.response?.data?.detail ?? e?.message ?? "Unknown error";
+      const rawDetail = e?.response?.data?.detail;
+      const detail = typeof rawDetail === "string" ? rawDetail
+        : typeof rawDetail === "object" && rawDetail !== null
+          ? (rawDetail.detail ?? rawDetail.error ?? JSON.stringify(rawDetail))
+          : (e?.message ?? "Unknown error");
       mark("Open Trades", false, `Bybit API Unavailable — ${detail}`);
     }
   }, []);
@@ -200,7 +208,11 @@ export default function AccountPage() {
       setBybitHistory(Array.isArray(data) ? data : []);
       mark("History", false);
     } catch (e) {
-      const detail = e?.response?.data?.detail ?? e?.message ?? "Unknown error";
+      const rawDetail = e?.response?.data?.detail;
+      const detail = typeof rawDetail === "string" ? rawDetail
+        : typeof rawDetail === "object" && rawDetail !== null
+          ? (rawDetail.detail ?? rawDetail.error ?? JSON.stringify(rawDetail))
+          : (e?.message ?? "Unknown error");
       mark("History", false, `Bybit API Unavailable — ${detail}`);
     }
   }, []);
@@ -223,7 +235,11 @@ export default function AccountPage() {
         setTrades(ts => ts.filter(t => String(t.id) !== String(tradeId)));
       }
     } catch (e) {
-      const msg = e?.response?.data?.detail ?? "Close failed — try again";
+      const rawMsg = e?.response?.data?.detail;
+      const msg = typeof rawMsg === "string" ? rawMsg
+        : typeof rawMsg === "object" && rawMsg !== null
+          ? (rawMsg.detail ?? rawMsg.error ?? JSON.stringify(rawMsg))
+          : (e?.message ?? "Close failed — try again");
       setCloseError(msg);
       setTimeout(() => setCloseError(null), 4000);
     } finally {

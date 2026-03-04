@@ -63,9 +63,9 @@ async def bybit_account(payload: dict = Depends(get_current_user)):
     try:
         return await fetch_account(*creds)
     except RuntimeError as e:
-        raise HTTPException(503, {"error": "Bybit API Unavailable", "detail": str(e)})
+        raise HTTPException(503, f"Bybit API error: {e}")
     except Exception as e:
-        raise HTTPException(503, {"error": "Bybit API Unavailable", "detail": str(e)})
+        raise HTTPException(503, f"Bybit API error: {e}")
 
 
 @router.get("/api/bybit/account/positions")
@@ -77,9 +77,9 @@ async def bybit_positions(payload: dict = Depends(get_current_user)):
     try:
         return await fetch_positions(*creds)
     except RuntimeError as e:
-        raise HTTPException(503, {"error": "Bybit API Unavailable", "detail": str(e)})
+        raise HTTPException(503, f"Bybit API error: {e}")
     except Exception as e:
-        raise HTTPException(503, {"error": "Bybit API Unavailable", "detail": str(e)})
+        raise HTTPException(503, f"Bybit API error: {e}")
 
 
 @router.get("/api/bybit/account/history")
@@ -91,9 +91,9 @@ async def bybit_trade_history(payload: dict = Depends(get_current_user), limit: 
     try:
         return await fetch_trade_history(*creds, limit=min(limit, 100))
     except RuntimeError as e:
-        raise HTTPException(503, {"error": "Bybit API Unavailable", "detail": str(e)})
+        raise HTTPException(503, f"Bybit API error: {e}")
     except Exception as e:
-        raise HTTPException(503, {"error": "Bybit API Unavailable", "detail": str(e)})
+        raise HTTPException(503, f"Bybit API error: {e}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

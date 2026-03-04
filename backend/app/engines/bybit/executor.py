@@ -71,7 +71,7 @@ def sign_get(api_key: str, api_secret: str, params: dict) -> tuple[dict, dict]:
     return params, _auth_headers(api_key, sig, ts)
 
 
-def sign_post(api_key: str, api_secret: str, body: dict) -> tuple[dict, dict]:
+def sign_post(api_key: str, api_secret: str, body: dict) -> tuple[str, dict]:
     """
     Sign a POST request.
     String: ts + apiKey + recvWindow + json_body (COMPACT — no whitespace).
@@ -79,10 +79,12 @@ def sign_post(api_key: str, api_secret: str, body: dict) -> tuple[dict, dict]:
     Uses separators=(',', ':') to strip all spaces. This is the root cause
     of error 10004 when standard json.dumps (which adds spaces) is used.
     """
-    ts         = _ts()
-    body_str   = json.dumps(body, separators=(",", ":"), ensure_ascii=True)
-    sig        = _sign(api_secret, ts + api_key + BYBIT_RECV_WINDOW + body_str)
-    return body, _auth_headers(api_key, sig, ts)
+    ts       = _ts()
+    body_str = json.dumps(body, separators=(",", ":"), sort_keys=False, ensure_ascii=True)
+    sig      = _sign(api_secret, ts + api_key + BYBIT_RECV_WINDOW + body_str)
+    # Return the EXACT compact string so callers send content= not json=.
+    # Returning the dict and letting httpx re-encode it adds spaces → 10004.
+    return body_str, _auth_headers(api_key, sig, ts)
 
 
 def raise_on_error(data: dict, ctx: str = "") -> None:
@@ -179,11 +181,11 @@ async def _set_margin_mode(api_key: str, secret: str, symbol: str,
         "buyLeverage":  str(BYBIT_DEFAULT_LEVERAGE),
         "sellLeverage": str(BYBIT_DEFAULT_LEVERAGE),
     }
-    _, headers = sign_post(api_key, secret, body)
+    body_str, headers = sign_post(api_key, secret, body)
     try:
         async with httpx.AsyncClient(timeout=15) as c:
             r = await c.post(f"{BYBIT_BASE}/v5/position/switch-isolated",
-                             headers=headers, json=body)
+                             headers=headers, content=body_str)
         d = r.json()
         if d.get("retCode", -1) not in (0, 110043):
             logger.warning("set_margin_mode %s: %s %s", symbol, d.get("retCode"), d.get("retMsg"))
@@ -198,10 +200,10 @@ async def _set_leverage(api_key: str, secret: str, symbol: str,
         "category": "linear", "symbol": symbol,
         "buyLeverage": str(leverage), "sellLeverage": str(leverage),
     }
-    _, headers = sign_post(api_key, secret, body)
+    body_str, headers = sign_post(api_key, secret, body)
     async with httpx.AsyncClient(timeout=15) as c:
         r = await c.post(f"{BYBIT_BASE}/v5/position/set-leverage",
-                         headers=headers, json=body)
+                         headers=headers, content=body_str)
     d = r.json()
     if d.get("retCode", -1) not in (0, 110043):
         logger.warning("set_leverage %s: %s %s", symbol, d.get("retCode"), d.get("retMsg"))
@@ -233,9 +235,10 @@ async def place_market_order(
         "timeInForce": "IOC",
         "positionIdx": 0,
     }
-    _, headers = sign_post(api_key, secret, body)
+    body_str, headers = sign_post(api_key, secret, body)
     async with httpx.AsyncClient(timeout=20) as c:
-        r = await c.post(f"{BYBIT_BASE}/v5/order/create", headers=headers, json=body)
+        r = await c.post(f"{BYBIT_BASE}/v5/order/create",
+                         headers=headers, content=body_str)
         r.raise_for_status()
     data = r.json()
     raise_on_error(data, f"place_market_order {symbol}")
@@ -253,9 +256,10 @@ async def close_position(api_key: str, secret: str,
         "qty": qty, "timeInForce": "IOC",
         "positionIdx": 0, "reduceOnly": True,
     }
-    _, headers = sign_post(api_key, secret, body)
+    body_str, headers = sign_post(api_key, secret, body)
     async with httpx.AsyncClient(timeout=20) as c:
-        r = await c.post(f"{BYBIT_BASE}/v5/order/create", headers=headers, json=body)
+        r = await c.post(f"{BYBIT_BASE}/v5/order/create",
+                         headers=headers, content=body_str)
         r.raise_for_status()
     data = r.json()
     raise_on_error(data, f"close_position {symbol}")
