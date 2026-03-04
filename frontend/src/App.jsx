@@ -29,7 +29,7 @@ import MarketsPage   from "./pages/MarketsPage";
 import SignalsPage   from "./pages/SignalsPage";
 import AccountPage   from "./pages/AccountPage";
 import ProfilePage   from "./pages/ProfilePage";
-import TabBar        from "./components/layout/TabBar";
+import TabBar        from "./components/shared/TabBar";
 import { useAuthStore } from "./store/authStore";
 import { useTheme }     from "./hooks/useTheme";
 import { usePushNotifications } from "./hooks/usePushNotifications";
