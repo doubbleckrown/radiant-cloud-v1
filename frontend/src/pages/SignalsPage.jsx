@@ -60,10 +60,11 @@ function fmtAgo(ts) {
   if (s < 3600) return `${Math.floor(s / 60)}m ago`;
   return `${Math.floor(s / 3600)}h ago`;
 }
-/** 5-min dedup bucket */
+/** Strict dedup key — instrument + direction only (no time bucket). 
+ *  Prevents EUR/GBP double-printing when the same signal is pushed via WS
+ *  AND fetched via REST in the same polling cycle. */
 function dedupeKey(sig) {
-  const bucket = Math.floor((sig.timestamp || 0) / 300);
-  return `${sig.instrument ?? sig.symbol}|${sig.direction}|${bucket}`;
+  return `${sig.instrument ?? sig.symbol}|${sig.direction}`;
 }
 /** True if this signal is "recent" (within active window) */
 function isRecent(sig) {
@@ -167,13 +168,20 @@ export default function SignalsPage() {
   }, [isCrypto, fetchSignals, fetchTradeLocks]);
 
   // ── Split signals into Active / History ───────────────────────────────────
+  // TRUTH LOGIC: Active tab requires BOTH:
+  //   1. Signal was 100% confluence (only 100% signals are real trade setups)
+  //   2. Instrument is currently locked  OR  signal is within the 2h TTL window
+  // If the market has moved below 100%, the signal drops from Active automatically.
   const activeSignals  = signals.filter(s => {
+    if ((s.confidence ?? 0) < 100) return false;   // ← non-100% never show as active
     const sym = s.instrument ?? s.symbol ?? "";
     return Boolean(tradeLocks[sym]) || isRecent(s);
   });
+  // History = everything else (sub-100% setups, expired locks, old 100% signals)
   const historySignals = signals.filter(s => {
-    const sym = s.instrument ?? s.symbol ?? "";
-    return !Boolean(tradeLocks[sym]) && !isRecent(s);
+    const isActive100 = (s.confidence ?? 0) >= 100 &&
+      (Boolean(tradeLocks[s.instrument ?? s.symbol ?? ""]) || isRecent(s));
+    return !isActive100;
   });
   const displaySignals = activeTab === "Active" ? activeSignals : historySignals;
 
@@ -382,26 +390,48 @@ function SignalCard({ sig, locked, isActive, isCrypto, accent, accentDim, accent
   const [expanded, setExpanded] = useState(false);
 
   const isLong    = sig.direction === "LONG";
-  const dirColor  = isLong ? C.green : C.red;
+  // Spec-exact colors: true green / true red (not pinkish)
+  const dirColor  = isLong ? "#00FF41" : "#FF0000";
   const sym       = (sig.instrument ?? sig.symbol ?? "").replace("_", "/");
   const conf      = sig.confidence ?? 0;
-  const confColor = conf >= 100 ? accent : conf >= 80 ? C.amber : C.label;
-  const wasExec   = conf >= 100; // bot executed this
   const dp        = isCrypto ? 4 : 5;
+
+  // ── Layered Confluence Color Evolution ──────────────────────────────────
+  // L1 (34%) grey → L2 (67%) amber → L3 (100%) neon green/red
+  const confColor = conf >= 100
+    ? (isLong ? "#00FF00" : "#FF0000")
+    : conf >= 67
+    ? "#FFB800"
+    : conf >= 34
+    ? "#888888"
+    : C.sub;
+
+  // ── Execution badge (backed by API result, not just confidence level) ────
+  const execStatus = sig.exec_status ?? null;
+  const execOk     = execStatus === "ok";
+  const execFailed = execStatus === "failed";
+
+  // Panic glow at 100%
+  const isPanic = conf >= 100;
 
   return (
     <motion.div
       layout
+      animate={{ boxShadow: isPanic ? [
+        "0 0 0px transparent",
+        `0 0 24px ${isLong ? "#00FF0030" : "#FF000030"}`,
+        "0 0 0px transparent",
+      ] : "none" }}
+      transition={isPanic ? { duration: 2, repeat: Infinity, ease: "easeInOut" } : {}}
       style={{
         borderRadius: 18, overflow: "hidden",
         background:   C.card,
         border:       locked
           ? "1px solid rgba(255,165,0,0.35)"
-          : wasExec
-          ? `1px solid ${accent}30`
+          : isPanic
+          ? `1px solid ${isLong ? "rgba(0,255,0,0.30)" : "rgba(255,0,0,0.30)"}`
           : `1px solid ${C.cardBdr}`,
         opacity:      !isActive ? 0.65 : 1,
-        boxShadow:    wasExec ? `0 0 22px ${accent}14` : "none",
       }}
     >
       {/* ── Header ────────────────────────────────────────────────────── */}
@@ -429,9 +459,14 @@ function SignalCard({ sig, locked, isActive, isCrypto, accent, accentDim, accent
             <span style={{
               fontSize: "0.7rem", fontWeight: 800, letterSpacing: "0.1em",
               padding: "3px 9px", borderRadius: 6,
-              background: `${dirColor}18`, border: `1px solid ${dirColor}40`,
+              background: isLong ? "rgba(0,255,65,0.12)" : "rgba(255,0,0,0.12)",
+              border: `1px solid ${dirColor}50`,
               color: dirColor, fontFamily: FONT_MONO,
-              filter: `drop-shadow(0 0 8px ${dirColor}cc)`,
+              // Spec: true green #00FF00 glow for BULLISH, true red #FF0000 for BEARISH
+              textShadow: isLong
+                ? "0 0 12px rgba(0,255,0,0.9)"
+                : "0 0 12px rgba(255,0,0,0.9)",
+              filter: `drop-shadow(0 0 8px ${dirColor}bb)`,
             }}>
               {isLong ? "BULLISH" : "BEARISH"}
             </span>
@@ -442,13 +477,21 @@ function SignalCard({ sig, locked, isActive, isCrypto, accent, accentDim, accent
                 color: "#FFA500", fontFamily: FONT_MONO,
               }}>🔒 POSITION OPEN</span>
             )}
-            {wasExec && !locked && (
+            {execOk && !locked && (
               <span style={{
                 fontSize: "0.62rem", fontWeight: 700, padding: "3px 9px", borderRadius: 6,
-                background: `${accent}10`, border: `1px solid ${accent}28`,
-                color: accent, fontFamily: FONT_MONO,
-                filter: `drop-shadow(0 0 6px ${accent}99)`,
+                background: "rgba(0,255,0,0.10)", border: "1px solid rgba(0,255,0,0.28)",
+                color: "#00FF00", fontFamily: FONT_MONO,
+                filter: "drop-shadow(0 0 6px rgba(0,255,0,0.7))",
               }}>✓ BOT EXECUTED</span>
+            )}
+            {execFailed && (
+              <span style={{
+                fontSize: "0.62rem", fontWeight: 700, padding: "3px 9px", borderRadius: 6,
+                background: "rgba(255,0,0,0.10)", border: "1px solid rgba(255,0,0,0.30)",
+                color: "#FF0000", fontFamily: FONT_MONO,
+                filter: "drop-shadow(0 0 6px rgba(255,0,0,0.5))",
+              }}>✗ EXECUTION FAILED</span>
             )}
           </div>
           <p style={{ color: C.sub, fontSize: "0.72rem", margin: "3px 0 0", fontFamily: FONT_MONO }}>
@@ -460,15 +503,20 @@ function SignalCard({ sig, locked, isActive, isCrypto, accent, accentDim, accent
           <motion.p
             animate={{
               color: confColor,
-              textShadow: conf >= 100 ? `0 0 12px ${confColor}, 0 0 24px ${confColor}80` : "none",
+              // Layered glow: none at L1, subtle at L2, intense at L3
+              textShadow: conf >= 100
+                ? `0 0 14px ${confColor}, 0 0 28px ${confColor}90`
+                : conf >= 67
+                ? `0 0 8px ${confColor}80`
+                : "none",
             }}
             transition={{ duration: 0.3 }}
             style={{ fontSize: "1.44rem", fontWeight: 800, fontFamily: FONT_MONO, margin: 0 }}
           >
             {conf}%
           </motion.p>
-          <p style={{ color: C.sub, fontSize: "0.62rem", margin: "2px 0 0", letterSpacing: "0.06em" }}>
-            CONFLUENCE
+          <p style={{ color: conf >= 100 ? confColor : C.sub, fontSize: "0.62rem", margin: "2px 0 0", letterSpacing: "0.06em" }}>
+            {conf >= 100 ? "FULL CONF" : conf >= 67 ? "L2 ZONE" : conf >= 34 ? "L1 TREND" : "SCANNING"}
           </p>
         </div>
 
@@ -510,13 +558,13 @@ function SignalCard({ sig, locked, isActive, isCrypto, accent, accentDim, accent
           >
             <div style={{ padding: "14px 16px", borderTop: `1px solid ${C.cardBdr}` }}>
               <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
-                <LayerBadge label="L1 Trend" active={!!sig.layer1} value={sig.layer1}          accent={accent} />
-                <LayerBadge label="L2 Zone"  active={!!sig.layer2} value={sig.layer2 ? "OB/FVG" : null} accent={accent} />
-                <LayerBadge label="L3 MSS"   active={!!sig.layer3} value={sig.layer3 ? "CHoCH" : null} accent={accent} />
+                <LayerBadge label="L1 Trend" active={!!sig.layer1} value={sig.layer1}          accent={accent} isLong={isLong} />
+                <LayerBadge label="L2 Zone"  active={!!sig.layer2} value={sig.layer2 ? "OB/FVG" : null} accent={accent} isLong={isLong} />
+                <LayerBadge label="L3 MSS"   active={!!sig.layer3} value={sig.layer3 ? "CHoCH" : null} accent={accent} isLong={isLong} />
               </div>
               <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                 <DetailRow label="Breakeven"   value={fmtPrice(sig.breakeven, dp)} mono />
-                <DetailRow label="Risk/Reward" value={`1 : ${sig.rr ?? (isCrypto ? "3.0" : "2.0")}`} mono />
+                <DetailRow label="Risk/Reward" value={`1 : ${sig.rr ?? "3.0"}`} mono />
                 <DetailRow label="Engine"      value={isCrypto ? "Bybit Linear · 20× Isolated" : "Oanda v20 · Max Margin"} />
                 {locked && (
                   <div style={{
@@ -525,6 +573,15 @@ function SignalCard({ sig, locked, isActive, isCrypto, accent, accentDim, accent
                     color: "#FFA500", fontSize: "0.67rem",
                   }}>
                     🔒 Position open. No new entries for this instrument until SL/TP hit or 2h TTL expires.
+                  </div>
+                )}
+                {sig.exec_error && (
+                  <div style={{
+                    marginTop: 4, padding: "8px 12px", borderRadius: 8,
+                    background: "rgba(255,0,0,0.07)", border: "1px solid rgba(255,0,0,0.22)",
+                    color: "#FF4444", fontSize: "0.67rem",
+                  }}>
+                    ✗ Execution failed: {sig.exec_error}
                   </div>
                 )}
               </div>
@@ -536,21 +593,37 @@ function SignalCard({ sig, locked, isActive, isCrypto, accent, accentDim, accent
   );
 }
 
-function LayerBadge({ label, active, value, accent }) {
+// ── Layer color map: L1=grey, L2=amber, L3=accent (per direction) ───────────
+const LAYER_COLORS = {
+  "L1 Trend": { active: "#888888", glow: "rgba(136,136,136,0.4)" },
+  "L2 Zone":  { active: "#FFB800", glow: "rgba(255,184,0,0.5)"   },
+  "L3 MSS":   { active: "#00FF41", glow: "rgba(0,255,65,0.6)"    },
+};
+
+function LayerBadge({ label, active, value, accent, isLong }) {
+  // Use per-layer color when active; grey when inactive
+  const layerColor = LAYER_COLORS[label];
+  const activeColor = label === "L3 MSS"
+    ? (isLong ? "#00FF00" : "#FF0000")   // L3 uses direction color
+    : (layerColor?.active ?? accent);
+  const glowColor   = label === "L3 MSS"
+    ? (isLong ? "rgba(0,255,0,0.6)" : "rgba(255,0,0,0.6)")
+    : (layerColor?.glow ?? "transparent");
   return (
     <div style={{
       display: "flex", alignItems: "center", gap: 5,
       padding: "4px 10px", borderRadius: 8,
-      background: active ? `${accent}12` : "rgba(255,255,255,0.03)",
-      border: `1px solid ${active ? `${accent}35` : C.cardBdr}`,
+      background: active ? `${activeColor}12` : "rgba(255,255,255,0.03)",
+      border: `1px solid ${active ? `${activeColor}40` : C.cardBdr}`,
+      filter: active && label === "L3 MSS" ? `drop-shadow(0 0 4px ${glowColor})` : "none",
     }}>
       <div style={{
         width: 6, height: 6, borderRadius: "50%",
-        background: active ? accent : C.sub,
-        boxShadow: active ? `0 0 5px ${accent}` : "none",
+        background: active ? activeColor : C.sub,
+        boxShadow: active ? `0 0 5px ${activeColor}` : "none",
       }} />
       <span style={{
-        color: active ? accent : C.sub,
+        color: active ? activeColor : C.sub,
         fontSize: "0.6rem", fontWeight: 700,
         fontFamily: FONT_MONO, letterSpacing: "0.06em",
       }}>

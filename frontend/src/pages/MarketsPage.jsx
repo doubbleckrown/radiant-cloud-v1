@@ -408,19 +408,25 @@ function ConfBadge({ conf, bias, accent }) {
   const isBearish  = bias === "SHORT" || bias === "BEARISH";
   const biasLabel  = isBullish ? "BULLISH" : isBearish ? "BEARISH" : "";
 
-  // Spec-exact neon colors for directional labels
-  const bullColor  = "#4ADE80";
-  const bearColor  = "#F87171";
+  // ── Layered Confluence Color Evolution (matches SignalsPage spec) ─────────
+  // L1 (34%) : Grey       — Directional bias only
+  // L2 (67%) : Amber      — OB/FVG zone confirmed
+  // L3 (100%): Pure Green/Red — Full confluence. Spec: #00FF00/#FF0000
+  const layerColor = conf >= 100
+    ? (isBullish ? "#00FF00" : isBearish ? "#FF0000" : accent)
+    : conf >= 67
+    ? "#FFB800"
+    : conf >= 34
+    ? "#888888"
+    : C.sub;
 
-  // Badge confidence color — accent at 100%, amber at ≥80%, sub otherwise
-  const confColor  = conf >= 100 ? accent : conf >= 80 ? C.amber : C.sub;
+  // At 100%, directional labels override to spec-exact true colors
+  const labelColor = layerColor;
 
-  // Directional labels use spec neon; neutral uses confColor
-  const labelColor = isBullish ? bullColor : isBearish ? bearColor : confColor;
-  const glowColor  = isBullish
-    ? "rgba(74, 222, 128, 0.9)"
-    : isBearish
-    ? "rgba(248, 113, 113, 0.9)"
+  const glowColor = conf >= 100
+    ? (isBullish ? "rgba(0,255,0,0.85)" : isBearish ? "rgba(255,0,0,0.85)" : null)
+    : conf >= 67
+    ? "rgba(255,184,0,0.6)"
     : null;
 
   return (
@@ -434,10 +440,8 @@ function ConfBadge({ conf, bias, accent }) {
       color:         labelColor,
       fontFamily:    FONT_MONO,
       letterSpacing: "0.06em",
-      textShadow:    glowColor ? `0 0 12px ${glowColor}` : "none",
-      filter:        (conf >= 100 || isBullish || isBearish)
-                       ? `drop-shadow(0 0 6px ${labelColor}99)`
-                       : "none",
+      textShadow:    glowColor ? `0 0 10px ${glowColor}` : "none",
+      filter:        conf >= 67 ? `drop-shadow(0 0 6px ${labelColor}99)` : "none",
     }}>
       {conf}% {biasLabel}
     </span>

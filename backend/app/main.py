@@ -158,35 +158,47 @@ _bybit_signal_history: dict[str, list[dict]] = {sym: [] for sym in BYBIT_SYMBOLS
 # ── Settings file — persists risk_pct across server restarts ─────────────────
 # Stored next to main.py as "settings.json".  Written on every update.
 # On startup, loaded BEFORE the .env fallback so the last slider value wins.
-_SETTINGS_PATH = Path(__file__).resolve().parent / "settings.json"
+_SETTINGS_DIR  = Path(__file__).resolve().parent / "user_settings"
+_SETTINGS_DIR.mkdir(exist_ok=True)   # create dir on first import
 
-def _load_settings() -> dict:
-    """Load settings.json from disk; return {} on missing/corrupt file."""
+
+def _user_settings_path(clerk_id: str) -> Path:
+    """Return the settings file path for a specific Clerk user ID."""
+    # Sanitize clerk_id — strip any path chars just in case
+    safe_id = clerk_id.replace("/", "").replace("\\", "").replace("..", "")
+    return _SETTINGS_DIR / f"user_{safe_id}_settings.json"
+
+
+def _load_settings(clerk_id: str = "default") -> dict:
+    """Load per-user settings from disk; return {} on missing/corrupt file."""
+    path = _user_settings_path(clerk_id)
     try:
-        if _SETTINGS_PATH.exists():
-            with open(_SETTINGS_PATH, "r") as f:
+        if path.exists():
+            with open(path, "r") as f:
                 return json.load(f)
     except Exception as exc:
-        logger.warning("settings.json load failed: %s", exc)
+        logger.warning("settings load failed for %s: %s", clerk_id, exc)
     return {}
 
-def _save_settings(data: dict) -> None:
-    """Atomically write settings to disk."""
+
+def _save_settings(data: dict, clerk_id: str = "default") -> None:
+    """Atomically write per-user settings to disk."""
+    path = _user_settings_path(clerk_id)
     try:
-        tmp = _SETTINGS_PATH.with_suffix(".json.tmp")
+        tmp = path.with_suffix(".json.tmp")
         with open(tmp, "w") as f:
             json.dump(data, f, indent=2)
-        tmp.replace(_SETTINGS_PATH)
-        logger.debug("settings.json saved: %s", data)
+        tmp.replace(path)
+        logger.debug("Settings saved for %s: %s", clerk_id, data)
     except Exception as exc:
-        logger.warning("settings.json save failed: %s", exc)
+        logger.warning("Settings save failed for %s: %s", clerk_id, exc)
 
 # ── Runtime-overridable risk % ────────────────────────────────────────────────
 # Priority (highest → lowest):
 #   1. _runtime_risk_pct  — set by POST /api/settings/update (in-memory, persisted to settings.json)
 #   2. settings.json      — last value saved across restarts
 #   3. BOT_RISK_PCT .env  — initial default (default 10.0)
-_saved_settings   = _load_settings()
+_saved_settings   = _load_settings("default")
 _runtime_risk_pct: float = float(_saved_settings.get("risk_pct", -1.0))
 
 def _get_bot_risk_pct() -> float:
@@ -222,10 +234,20 @@ _bybit_engines: dict[str, SMCConfluenceEngine] = {
 TRADE_LOCK_TTL_SECONDS = 7200  # 2 hours
 
 class TradeTracker:
-    """In-memory trade lock registry.  Thread-safe via asyncio single-thread model."""
+    """
+    In-memory trade lock registry.  Thread-safe via asyncio single-thread model.
+
+    Each lock entry stores:
+      direction  — "LONG" | "SHORT"
+      entry      — fill/entry price
+      sl         — stop-loss price  ← read by exit_monitor_loop for active TP/SL check
+      tp         — take-profit price ← read by exit_monitor_loop
+      trade_id   — broker order/trade ID (updated after fill)
+      opened_at  — Unix timestamp at lock creation  ← TTL reference
+      expires_at — opened_at + 7200 s  (hard 2-h kill)
+    """
 
     def __init__(self) -> None:
-        # symbol → {direction, entry, expires_at, trade_id}
         self._locks: dict[str, dict] = {}
 
     def is_locked(self, symbol: str) -> bool:
@@ -234,21 +256,42 @@ class TradeTracker:
             return False
         if time.time() > lock["expires_at"]:
             del self._locks[symbol]
-            logger.info("TradeTracker: lock EXPIRED for %s", symbol)
+            logger.info("TradeTracker: lock EXPIRED (2h TTL) for %s", symbol)
             return False
         return True
 
-    def lock(self, symbol: str, direction: str, entry: float, trade_id: str = "") -> None:
+    def lock(
+        self,
+        symbol:    str,
+        direction: str,
+        entry:     float,
+        trade_id:  str   = "",
+        sl:        float = 0.0,
+        tp:        float = 0.0,
+    ) -> None:
+        """
+        Create or update a lock.  On the "pending → filled" update, the
+        original opened_at is preserved so the TTL clock is not reset.
+        sl and tp are only overwritten when non-zero so the pending lock
+        (placed before order fill) can carry them through.
+        """
+        now      = time.time()
+        existing = self._locks.get(symbol, {})
+        opened   = existing.get("opened_at", now)  # preserve original open time
         self._locks[symbol] = {
             "direction":  direction,
             "entry":      entry,
+            "sl":         sl   if sl   != 0.0 else existing.get("sl",   0.0),
+            "tp":         tp   if tp   != 0.0 else existing.get("tp",   0.0),
             "trade_id":   trade_id,
-            "locked_at":  time.time(),
-            "expires_at": time.time() + TRADE_LOCK_TTL_SECONDS,
+            "opened_at":  opened,
+            "expires_at": opened + TRADE_LOCK_TTL_SECONDS,
         }
         logger.info(
-            "TradeTracker: LOCKED %s %s @ %.5f  (expires in 2h)",
+            "TradeTracker: LOCKED %s %s @ %.5f  sl=%.5f  tp=%.5f  (2h TTL from open)",
             symbol, direction, entry,
+            self._locks[symbol]["sl"],
+            self._locks[symbol]["tp"],
         )
 
     def unlock(self, symbol: str) -> None:
@@ -262,7 +305,7 @@ class TradeTracker:
         return self._locks.get(symbol)
 
     def all_locks(self) -> dict[str, dict]:
-        """Return snapshot of active locks (pruning expired ones first)."""
+        """Return snapshot of active locks (pruning TTL-expired ones first)."""
         stale = [s for s, l in self._locks.items() if time.time() > l["expires_at"]]
         for s in stale:
             del self._locks[s]
@@ -459,10 +502,21 @@ async def place_market_order(
 
 
 async def close_oanda_trade(api_key: str, account_id: str, trade_id: str) -> dict:
-    """Close a specific Oanda trade by ID using PUT /v3/accounts/{id}/trades/{id}/close."""
+    """
+    Close a specific Oanda trade at market price.
+
+    Oanda v20 spec:
+      PUT /v3/accounts/{accountID}/trades/{tradeSpecifier}/close
+      Body: {"units": "ALL"}  — closes the full position
+      tradeSpecifier must be the numeric trade ID string (e.g. "12345")
+    """
     url = f"{OANDA_BASE}/v3/accounts/{account_id}/trades/{trade_id}/close"
     async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.put(url, headers=_oanda_headers_for(api_key), json={"units": "ALL"})
+        resp = await client.put(
+            url,
+            headers=_oanda_headers_for(api_key),
+            json={"units": "ALL"},   # "ALL" = close entire position at market
+        )
         resp.raise_for_status()
     return resp.json()
 
@@ -471,9 +525,16 @@ async def close_bybit_position(
     api_key: str, api_secret: str, symbol: str, side: str, qty: str,
 ) -> dict:
     """
-    Close a Bybit Linear position by placing a market order on the opposite side.
-    side: current position side — "Buy" → close with "Sell", vice versa.
-    qty:  current position size as string.
+    Close a Bybit Linear (USDT perpetual) position at market price.
+
+    Bybit V5 spec for reduce-only market close:
+      POST /v5/order/create
+      category   = "linear"  — identifies USDT perpetual contract type (required)
+      orderType  = "Market"  — fills immediately at best available price
+      side       = opposite of the open position side
+      reduceOnly = True      — guarantees this order only reduces, never opens
+      timeInForce = "IOC"    — required for Market orders per V5 spec
+      positionIdx = 0        — one-way mode (Unified Account default)
     """
     close_side = "Sell" if side == "Buy" else "Buy"
     body = {
@@ -494,8 +555,7 @@ async def close_bybit_position(
         )
         resp.raise_for_status()
     data = resp.json()
-    if data.get("retCode", -1) != 0:
-        raise RuntimeError(f"Bybit close error {data.get('retCode')}: {data.get('retMsg')}")
+    _bybit_raise_on_error(data, f"close_bybit_position {symbol}")
     logger.info("✅ Bybit position closed: %s %s qty=%s", symbol, close_side, qty)
     return data
 
@@ -622,35 +682,109 @@ async def bybit_fetch_tickers(symbols: list[str]) -> dict[str, dict]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Bybit V5 — HMAC-SHA256 signing helpers
+#  Bybit V5 — HMAC-SHA256 signing helpers  (strict spec implementation)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+#  Bybit V5 signature string:
+#    GET  : ts + apiKey + recvWindow + queryString   (raw, NOT url-encoded again)
+#    POST : ts + apiKey + recvWindow + json_body      (compact JSON, no spaces)
+#
+#  Headers required on every authenticated request:
+#    X-BAPI-API-KEY        — your API key
+#    X-BAPI-SIGN           — hex HMAC-SHA256 of the signature string
+#    X-BAPI-TIMESTAMP      — Unix ms as string (must be within recv_window of server time)
+#    X-BAPI-RECV-WINDOW    — "5000" (max 5000 recommended by Bybit)
+#    X-BAPI-SIGN-TYPE      — "2" (HMAC-SHA256)
+#
+#  Error 10004 = invalid signature — most common causes:
+#    1. Server clock skew > recv_window  →  use NTP / ensure system time is synced
+#    2. Wrong string order              →  ts FIRST, then api_key, then rw, then payload
+#    3. Extra spaces in JSON body       →  use separators=(",",":")
+#    4. Params double-encoded in GET    →  build qs from sorted items ONCE
 # ─────────────────────────────────────────────────────────────────────────────
 
-BYBIT_RECV_WINDOW = 5000   # ms
+BYBIT_RECV_WINDOW = "5000"   # kept as string — Bybit spec requires string comparison
 
-def _bybit_sign_get(api_key: str, api_secret: str, params: dict) -> tuple:
-    """Sign a Bybit V5 GET request. Returns (params, headers)."""
-    ts  = str(int(time.time() * 1000))
-    rw  = str(BYBIT_RECV_WINDOW)
+
+def _bybit_timestamp() -> str:
+    """Return current UTC time as integer milliseconds string."""
+    return str(int(time.time() * 1000))
+
+
+def _bybit_sign(api_secret: str, payload: str) -> str:
+    """HMAC-SHA256 of payload string. Returns lowercase hex digest."""
+    return hmac.new(
+        api_secret.encode("utf-8"),
+        payload.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def _bybit_headers(api_key: str, sig: str, ts: str) -> dict:
+    """Return the five required Bybit V5 authentication headers."""
+    return {
+        "X-BAPI-API-KEY":     api_key,
+        "X-BAPI-SIGN":        sig,
+        "X-BAPI-TIMESTAMP":   ts,
+        "X-BAPI-RECV-WINDOW": BYBIT_RECV_WINDOW,
+        "X-BAPI-SIGN-TYPE":   "2",
+        "Content-Type":       "application/json",
+    }
+
+
+def _bybit_sign_get(api_key: str, api_secret: str, params: dict) -> tuple[dict, dict]:
+    """
+    Sign a Bybit V5 GET request.
+
+    Query string is built from sorted key-value pairs so it is deterministic.
+    Signature string: ts + apiKey + recvWindow + queryString
+
+    Returns (params, headers) — params is unchanged (caller adds to url).
+    """
+    ts  = _bybit_timestamp()
     qs  = urllib.parse.urlencode(sorted(params.items()))
-    sig = hmac.new(api_secret.encode(), (ts + api_key + rw + qs).encode(), hashlib.sha256).hexdigest()
-    return params, {
-        "X-BAPI-API-KEY": api_key, "X-BAPI-SIGN": sig,
-        "X-BAPI-TIMESTAMP": ts, "X-BAPI-RECV-WINDOW": rw,
-        "X-BAPI-SIGN-TYPE": "2", "Content-Type": "application/json",
-    }
+    sig = _bybit_sign(api_secret, ts + api_key + BYBIT_RECV_WINDOW + qs)
+    return params, _bybit_headers(api_key, sig, ts)
 
 
-def _bybit_sign_post(api_key: str, api_secret: str, body: dict) -> tuple:
-    """Sign a Bybit V5 POST request. Returns (body, headers)."""
-    ts  = str(int(time.time() * 1000))
-    rw  = str(BYBIT_RECV_WINDOW)
-    jb  = json.dumps(body, separators=(",", ":"))
-    sig = hmac.new(api_secret.encode(), (ts + api_key + rw + jb).encode(), hashlib.sha256).hexdigest()
-    return body, {
-        "X-BAPI-API-KEY": api_key, "X-BAPI-SIGN": sig,
-        "X-BAPI-TIMESTAMP": ts, "X-BAPI-RECV-WINDOW": rw,
-        "X-BAPI-SIGN-TYPE": "2", "Content-Type": "application/json",
-    }
+def _bybit_sign_post(api_key: str, api_secret: str, body: dict) -> tuple[dict, dict]:
+    """
+    Sign a Bybit V5 POST request.
+
+    Body is serialized to compact JSON (no spaces).
+    Signature string: ts + apiKey + recvWindow + jsonBody
+
+    Returns (body, headers).
+    """
+    ts  = _bybit_timestamp()
+    jb  = json.dumps(body, separators=(",", ":"), ensure_ascii=True)
+    sig = _bybit_sign(api_secret, ts + api_key + BYBIT_RECV_WINDOW + jb)
+    return body, _bybit_headers(api_key, sig, ts)
+
+
+def _bybit_raise_on_error(data: dict, context: str = "") -> None:
+    """
+    Raise a descriptive RuntimeError if Bybit returned a non-zero retCode.
+
+    Bybit error codes relevant to auth:
+      10003 — API key does not exist
+      10004 — Invalid signature (clock skew or wrong string)
+      10005 — API key expired
+      10006 — Rate limit hit
+    """
+    ret  = data.get("retCode", -1)
+    if ret == 0:
+        return
+    msg  = data.get("retMsg", "Unknown error")
+    hint = ""
+    if ret == 10004:
+        hint = " — CHECK: system clock sync (NTP), API key permissions, IP whitelist"
+    elif ret == 10003:
+        hint = " — API key not found; check BYBIT_API_KEY in .env"
+    elif ret == 10005:
+        hint = " — API key expired; regenerate in Bybit dashboard"
+    raise RuntimeError(f"Bybit retCode {ret}: {msg}{hint} [{context}]")
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -679,8 +813,7 @@ async def bybit_fetch_account(api_key: str, api_secret: str) -> dict:
         resp.raise_for_status()
 
     data = resp.json()
-    if data.get("retCode", -1) != 0:
-        raise RuntimeError(f"Bybit account error {data.get('retCode')}: {data.get('retMsg')}")
+    _bybit_raise_on_error(data, "bybit_fetch_account")
 
     account = (data.get("result", {}).get("list") or [{}])[0]
 
@@ -834,16 +967,23 @@ async def bybit_place_market_order(
     """
     await bybit_set_leverage(api_key, api_secret, symbol, leverage, margin_type)
 
+    # Bybit V5 spec: stopLoss and takeProfit must be strings; tpTriggerBy /
+    # slTriggerBy default to "LastPrice" if omitted but "MarkPrice" is safer
+    # for perps as it avoids wick-triggered exits on thin books.
+    # timeInForce for Market orders must be "IOC" or "FOK"; SL/TP are
+    # attached to the *position*, not the order, so they persist after fill.
     body = {
         "category":    "linear",
         "symbol":      symbol,
         "side":        side,
         "orderType":   "Market",
         "qty":         qty,
-        "stopLoss":    f"{stop_loss:.4f}",
-        "takeProfit":  f"{take_profit:.4f}",
+        "stopLoss":    f"{stop_loss:.4f}",     # string price as required by V5 spec
+        "takeProfit":  f"{take_profit:.4f}",   # string price as required by V5 spec
+        "tpTriggerBy": "MarkPrice",            # trigger TP on mark price (avoids wick)
+        "slTriggerBy": "MarkPrice",            # trigger SL on mark price
         "timeInForce": "IOC",
-        "positionIdx": 0,   # 0 = one-way mode
+        "positionIdx": 0,   # 0 = one-way mode (required for Unified Account)
     }
     _, headers = _bybit_sign_post(api_key, api_secret, body)
 
@@ -928,6 +1068,8 @@ async def _bybit_auto_execute(sym: str, sig_dict: dict, signal) -> None:
     Hard-automate: place a Bybit market order for every 100% confluence signal.
     Uses BYBIT_API_KEY / BYBIT_API_SECRET from .env — no user loop.
     TradeTracker is locked BEFORE the order to prevent re-entry.
+    On success: sig_dict['exec_status'] = 'ok', 'exec_order_id' = orderId
+    On failure: sig_dict['exec_status'] = 'failed', 'exec_error' = error message
     """
     if _trade_tracker.is_locked(sym):
         logger.info("AutoExec BYBIT: %s already locked — skip", sym)
@@ -936,6 +1078,8 @@ async def _bybit_auto_execute(sym: str, sig_dict: dict, signal) -> None:
     creds = _get_bybit_creds()
     if not creds:
         logger.warning("AutoExec BYBIT: BYBIT_API_KEY/SECRET not configured in .env")
+        sig_dict["exec_status"] = "failed"
+        sig_dict["exec_error"]  = "BYBIT_API_KEY/SECRET not configured in .env"
         return
 
     api_key, api_secret = creds
@@ -945,6 +1089,8 @@ async def _bybit_auto_execute(sym: str, sig_dict: dict, signal) -> None:
         equity = float(account_data.get("totalEquity", 0) or 0)
         if equity <= 0:
             logger.warning("AutoExec BYBIT: zero equity — skip %s", sym)
+            sig_dict["exec_status"] = "failed"
+            sig_dict["exec_error"]  = "Zero account equity"
             return
 
         leverage    = BYBIT_DEFAULT_LEVERAGE
@@ -967,6 +1113,8 @@ async def _bybit_auto_execute(sym: str, sig_dict: dict, signal) -> None:
         sl_dist = abs(entry - sl)
         if sl_dist == 0:
             logger.warning("AutoExec BYBIT: SL=entry for %s — skip", sym)
+            sig_dict["exec_status"] = "failed"
+            sig_dict["exec_error"]  = "SL equals entry price"
             return
 
         safe_lev = _compute_safe_leverage(entry, sl, leverage)
@@ -975,22 +1123,33 @@ async def _bybit_auto_execute(sym: str, sig_dict: dict, signal) -> None:
         qty      = max(round(qty_raw, 3), min_qty)
         side     = "Buy" if signal.direction.value == "LONG" else "Sell"
 
-        # Lock instrument BEFORE order to prevent duplicate from next refresh tick
-        _trade_tracker.lock(sym, signal.direction.value, entry, "pending")
+        # Lock instrument BEFORE order — store sl/tp so exit monitor can watch it
+        _trade_tracker.lock(sym, signal.direction.value, entry, "pending", sl=sl, tp=tp)
 
         result   = await bybit_place_market_order(
             api_key, api_secret, sym, side, str(qty), sl, tp, safe_lev, margin_type,
         )
         trade_id = result.get("result", {}).get("orderId", "")
-        _trade_tracker.lock(sym, signal.direction.value, entry, trade_id)  # update with real ID
+        # Update lock with real orderId; sl/tp preserved from pending entry above
+        _trade_tracker.lock(sym, signal.direction.value, entry, trade_id, sl=sl, tp=tp)
+
+        # ── Write execution success back to sig_dict (frontend badge) ────
+        sig_dict["exec_status"]   = "ok"
+        sig_dict["exec_order_id"] = trade_id
+        sig_dict["exec_qty"]      = qty
+        sig_dict["exec_side"]     = side
 
         logger.info(
             "✅ BYBIT AUTO-EXEC: %s %s %s  qty=%.3f  lev=%d×  entry=%.4f  sl=%.4f  tp=%.4f",
             sym, side, margin_type, qty, safe_lev, entry, sl, tp,
         )
     except Exception as exc:
-        logger.error("AutoExec BYBIT FAILED %s: %s", sym, exc)
+        err_msg = str(exc)
+        logger.error("AutoExec BYBIT FAILED %s: %s", sym, err_msg)
         _trade_tracker.unlock(sym)   # release lock if order failed
+        # ── Write failure back to sig_dict so history tab shows "FAILED" ─
+        sig_dict["exec_status"] = "failed"
+        sig_dict["exec_error"]  = err_msg
 
 
 
@@ -1234,20 +1393,34 @@ async def _oanda_auto_execute(ins: str, sig_dict: dict, signal) -> None:
             logger.warning("AutoExec OANDA: computed units<1 for %s — skip", ins)
             return
 
-        # Lock BEFORE order
-        _trade_tracker.lock(ins, signal.direction.value, entry, "pending")
+        # Lock BEFORE order — store sl/tp so exit monitor can watch it
+        _trade_tracker.lock(ins, signal.direction.value, entry, "pending", sl=sl, tp=tp)
 
         result   = await place_market_order(api_key, account_id, ins, units, sl, tp)
-        trade_id = (result.get("orderCreateTransaction") or {}).get("id", "")
-        _trade_tracker.lock(ins, signal.direction.value, entry, trade_id)
+        fill_tx  = result.get("orderFillTransaction") or {}
+        trade_id = (result.get("orderCreateTransaction") or fill_tx).get("id", "")
+
+        if not fill_tx and result.get("orderCancelTransaction"):
+            cancel_reason = result["orderCancelTransaction"].get("reason", "UNKNOWN")
+            raise RuntimeError(f"Order cancelled by Oanda: {cancel_reason}")
+
+        # Update lock with real tradeId; sl/tp preserved from pending entry above
+        _trade_tracker.lock(ins, signal.direction.value, entry, trade_id, sl=sl, tp=tp)
+        sig_dict["exec_status"]   = "ok"
+        sig_dict["exec_order_id"] = trade_id
+        sig_dict["exec_units"]    = units
+        sig_dict["exec_fill_px"]  = float(fill_tx.get("price", entry))
 
         logger.info(
             "✅ OANDA AUTO-EXEC: %s %s  units=%d  entry=%.5f  sl=%.5f  tp=%.5f",
             ins, signal.direction.value, units, entry, sl, tp,
         )
     except Exception as exc:
-        logger.error("AutoExec OANDA FAILED %s: %s", ins, exc)
-        _trade_tracker.unlock(ins)   # release lock if order failed
+        err_msg = str(exc)
+        logger.error("AutoExec OANDA FAILED %s: %s", ins, err_msg)
+        _trade_tracker.unlock(ins)
+        sig_dict["exec_status"] = "failed"
+        sig_dict["exec_error"]  = err_msg
 
 
 async def candle_refresh_loop() -> None:
@@ -1389,6 +1562,172 @@ async def price_stream_loop() -> None:
 #  has no corresponding live position is automatically released so the SMC
 #  engine can find a fresh setup on the next candle refresh.
 # ─────────────────────────────────────────────────────────────────────────────
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Exit Monitor Loop  (TP / SL / 2-h TTL enforcement)
+#
+#  Why this exists:
+#    Exchange-side TP/SL can be silently dropped after network blips, margin
+#    mode changes, or API glitches.  This loop is the bot-side failsafe that
+#    actively monitors every open position and closes it when:
+#      • TP is hit  (LONG price >= tp  |  SHORT price <= tp)
+#      • SL is hit  (LONG price <= sl  |  SHORT price >= sl)
+#      • 2-h TTL expired  (opened_at + 7200 s has elapsed)
+#
+#  Sweep interval: every 30 seconds
+#  Price source:   _bybit_prices (60s ticker) / _latest_prices (real-time SSE)
+#
+#  All exits logged as:
+#    [EXIT] Closed BTCUSDT — TP hit (price 72150.00 >= tp 72000.00)
+#    [EXIT] Closed EUR_USD — SL hit (price 1.07820 <= sl 1.07850)
+#    [EXIT] Closed XAU_USD — TTL (2h expired; opened 7210s ago)
+# ─────────────────────────────────────────────────────────────────────────────
+
+EXIT_MONITOR_INTERVAL = 30    # seconds between sweeps
+
+
+async def _exit_close_bybit(sym: str, lock: dict, reason: str) -> None:
+    """Force-close a Bybit position via market order and release the TradeTracker lock."""
+    creds = _get_bybit_creds()
+    if not creds:
+        logger.error("[EXIT] Bybit creds missing — cannot close %s (%s)", sym, reason)
+        return
+    api_key, api_secret = creds
+    try:
+        # Fetch live position to get exact current size and side
+        positions = await bybit_fetch_positions(api_key, api_secret)
+        pos = next((p for p in positions if p.get("symbol") == sym), None)
+        if not pos:
+            # Position already gone — exchange-side TP/SL fired first
+            logger.info("[EXIT] %s already closed on exchange (%s)", sym, reason)
+            _trade_tracker.unlock(sym)
+            return
+        size = str(pos.get("size", "0"))
+        side = pos.get("side", "Buy")   # "Buy" = long position open
+        await close_bybit_position(api_key, api_secret, sym, side, size)
+        _trade_tracker.unlock(sym)
+        logger.info("[EXIT] Closed %s — %s  size=%s", sym, reason, size)
+    except Exception as exc:
+        logger.error("[EXIT] Failed to close Bybit %s (%s): %s", sym, reason, exc)
+
+
+async def _exit_close_oanda(ins: str, lock: dict, reason: str) -> None:
+    """Force-close an Oanda trade by ID and release the TradeTracker lock."""
+    creds = _get_oanda_creds()
+    if not creds:
+        logger.error("[EXIT] Oanda creds missing — cannot close %s (%s)", ins, reason)
+        return
+    api_key, account_id = creds
+    trade_id = lock.get("trade_id", "")
+    try:
+        if trade_id and trade_id != "pending":
+            # Primary path: use the stored numeric trade ID for precise close
+            await close_oanda_trade(api_key, account_id, trade_id)
+            _trade_tracker.unlock(ins)
+            logger.info("[EXIT] Closed %s — %s  trade_id=%s", ins, reason, trade_id)
+        else:
+            # Fallback: scan open trades and find by instrument name
+            trades    = await fetch_open_trades(api_key, account_id)
+            matching  = [t for t in trades if t.get("instrument") == ins]
+            if not matching:
+                logger.info("[EXIT] %s already closed on exchange (%s)", ins, reason)
+                _trade_tracker.unlock(ins)
+                return
+            for t in matching:
+                tid = str(t.get("id", ""))
+                if tid:
+                    await close_oanda_trade(api_key, account_id, tid)
+                    logger.info(
+                        "[EXIT] Closed %s — %s  trade_id=%s (fallback scan)",
+                        ins, reason, tid,
+                    )
+            _trade_tracker.unlock(ins)
+    except Exception as exc:
+        logger.error("[EXIT] Failed to close Oanda %s (%s): %s", ins, reason, exc)
+
+
+async def exit_monitor_loop() -> None:
+    """
+    Background watcher — sweeps every 30 seconds.
+
+    For every active TradeTracker lock it evaluates (in priority order):
+      1. Hard TTL  — opened_at + 2h elapsed → force market close regardless of PnL
+      2. TP hit    — LONG:  price >= tp  |  SHORT: price <= tp
+      3. SL hit    — LONG:  price <= sl  |  SHORT: price >= sl
+
+    Price data sources:
+      • Bybit  → _bybit_prices  (updated every 60s by bybit_refresh_loop)
+      • Oanda  → _latest_prices (updated in real-time by price_stream_loop SSE)
+    """
+    await asyncio.sleep(20)   # brief startup delay — let price streams warm up
+
+    while True:
+        try:
+            locks = _trade_tracker.all_locks()
+            now   = time.time()
+
+            for symbol, lock in list(locks.items()):
+                direction = lock.get("direction", "LONG")
+                sl        = float(lock.get("sl",       0) or 0)
+                tp        = float(lock.get("tp",       0) or 0)
+                opened_at = float(lock.get("opened_at", now) or now)
+                is_bybit  = symbol.endswith("USDT")
+
+                # ── Resolve live price ──────────────────────────────────────
+                price = (_bybit_prices if is_bybit else _latest_prices).get(symbol, 0.0)
+                if price <= 0:
+                    continue   # price not yet populated — skip this tick
+
+                # ── 1. Hard 2-hour TTL ──────────────────────────────────────
+                age_s = now - opened_at
+                if age_s >= TRADE_LOCK_TTL_SECONDS:
+                    reason = f"TTL (2h expired; opened {int(age_s)}s ago)"
+                    logger.warning(
+                        "[EXIT] %s — TTL triggered  age=%ds  price=%.5f",
+                        symbol, int(age_s), price,
+                    )
+                    if is_bybit:
+                        await _exit_close_bybit(symbol, lock, reason)
+                    else:
+                        await _exit_close_oanda(symbol, lock, reason)
+                    continue   # skip TP/SL checks after TTL close
+
+                # ── 2. Take-Profit check ────────────────────────────────────
+                if tp > 0:
+                    tp_hit = (direction == "LONG"  and price >= tp) or                              (direction == "SHORT" and price <= tp)
+                    if tp_hit:
+                        cmp    = ">=" if direction == "LONG" else "<="
+                        reason = f"TP hit (price {price:.5f} {cmp} tp {tp:.5f})"
+                        logger.info(
+                            "[EXIT] %s — TP triggered  price=%.5f  tp=%.5f  dir=%s",
+                            symbol, price, tp, direction,
+                        )
+                        if is_bybit:
+                            await _exit_close_bybit(symbol, lock, reason)
+                        else:
+                            await _exit_close_oanda(symbol, lock, reason)
+                        continue
+
+                # ── 3. Stop-Loss check ──────────────────────────────────────
+                if sl > 0:
+                    sl_hit = (direction == "LONG"  and price <= sl) or                              (direction == "SHORT" and price >= sl)
+                    if sl_hit:
+                        cmp    = "<=" if direction == "LONG" else ">="
+                        reason = f"SL hit (price {price:.5f} {cmp} sl {sl:.5f})"
+                        logger.info(
+                            "[EXIT] %s — SL triggered  price=%.5f  sl=%.5f  dir=%s",
+                            symbol, price, sl, direction,
+                        )
+                        if is_bybit:
+                            await _exit_close_bybit(symbol, lock, reason)
+                        else:
+                            await _exit_close_oanda(symbol, lock, reason)
+
+        except Exception as loop_exc:
+            logger.error("exit_monitor_loop error: %s", loop_exc)
+
+        await asyncio.sleep(EXIT_MONITOR_INTERVAL)
+
 
 async def trade_reconciliation_loop() -> None:
     """
@@ -1559,7 +1898,8 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(price_stream_loop())
     asyncio.create_task(candle_refresh_loop())
     asyncio.create_task(bybit_refresh_loop())
-    asyncio.create_task(trade_reconciliation_loop())
+    asyncio.create_task(exit_monitor_loop())          # TP/SL/TTL watcher (30s sweep)
+    asyncio.create_task(trade_reconciliation_loop())  # ghost-trade cleanup (5 min)
     yield
 
 
@@ -1722,10 +2062,22 @@ async def get_signals(_: dict = Depends(get_current_user)):
 @app.get("/api/bybit/trade-locks")
 async def get_trade_locks(_: dict = Depends(get_current_user)):
     """
-    Return currently locked symbols (instruments with an active open trade).
-    Used by the frontend to show lock status on signal cards.
+    Return currently locked symbols with enriched TTL info.
+    Used by the frontend to show lock badges and TTL countdowns on signal cards.
     """
-    return _trade_tracker.all_locks()
+    now   = time.time()
+    locks = _trade_tracker.all_locks()
+    enriched = {}
+    for sym, lock in locks.items():
+        opened  = float(lock.get("opened_at", now))
+        expires = float(lock.get("expires_at", now + TRADE_LOCK_TTL_SECONDS))
+        enriched[sym] = {
+            **lock,
+            "age_seconds":        int(now - opened),
+            "ttl_remaining_s":    max(0, int(expires - now)),
+            "ttl_pct":            round(min(100, (now - opened) / TRADE_LOCK_TTL_SECONDS * 100), 1),
+        }
+    return enriched
 
 
 @app.delete("/api/bybit/trade-locks/{symbol}")
@@ -1831,6 +2183,9 @@ async def bybit_account_route(payload: dict = Depends(get_current_user)):
     """
     Fetch Bybit Unified Trading Account balance.
     Returns: accountType, totalEquity, totalAvailable, totalMargin, totalUSDT, coin[]
+
+    On auth failure (retCode 10004) returns structured JSON with hint rather than
+    crashing the route — prevents the frontend from showing a raw 503 error.
     """
     clerk_id = payload["sub"]
     creds    = await _get_user_bybit_creds(clerk_id)
@@ -1841,8 +2196,11 @@ async def bybit_account_route(payload: dict = Depends(get_current_user)):
         )
     try:
         return await bybit_fetch_account(*creds)
+    except RuntimeError as exc:
+        # Clean JSON 503 — includes Bybit retCode and hint from _bybit_raise_on_error
+        raise HTTPException(503, detail={"error": "Bybit API Unavailable", "detail": str(exc)})
     except Exception as exc:
-        raise HTTPException(503, f"Bybit account error: {exc}")
+        raise HTTPException(503, detail={"error": "Bybit API Unavailable", "detail": str(exc)})
 
 
 @app.get("/api/bybit/account/positions")
@@ -1857,8 +2215,10 @@ async def bybit_positions_route(payload: dict = Depends(get_current_user)):
         )
     try:
         return await bybit_fetch_positions(*creds)
+    except RuntimeError as exc:
+        raise HTTPException(503, detail={"error": "Bybit API Unavailable", "detail": str(exc)})
     except Exception as exc:
-        raise HTTPException(503, f"Bybit positions error: {exc}")
+        raise HTTPException(503, detail={"error": "Bybit API Unavailable", "detail": str(exc)})
 
 
 @app.get("/api/bybit/account/history")
@@ -1876,8 +2236,10 @@ async def bybit_trade_history_route(
         )
     try:
         return await bybit_fetch_trade_history(*creds, limit=min(limit, 100))
+    except RuntimeError as exc:
+        raise HTTPException(503, detail={"error": "Bybit API Unavailable", "detail": str(exc)})
     except Exception as exc:
-        raise HTTPException(503, f"Bybit history error: {exc}")
+        raise HTTPException(503, detail={"error": "Bybit API Unavailable", "detail": str(exc)})
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2065,7 +2427,7 @@ class BotSettingsRequest(BaseModel):
 
 
 @app.get("/api/settings")
-async def get_bot_settings(_: dict = Depends(get_current_user)):
+async def get_bot_settings(payload: dict = Depends(get_current_user)):
     """
     Return current bot settings.  Frontend calls this on every page load
     to guarantee the UI always reflects the actual backend value —
@@ -2092,19 +2454,21 @@ async def update_bot_settings(
     a server restart or process recycle.
     """
     global _runtime_risk_pct
-    changed = {}
+    clerk_id = payload.get("sub", "default")
+    changed  = {}
     if body.risk_pct is not None:
         clamped = max(1.0, min(20.0, float(body.risk_pct)))
         _runtime_risk_pct = clamped
         changed["risk_pct"] = clamped
-        # ── Persist to disk so the value survives a restart ──────────────
-        _save_settings({"risk_pct": clamped})
-        logger.info("Bot risk updated -> %.1f%% (persisted to settings.json)", clamped)
+        existing = _load_settings(clerk_id)
+        existing["risk_pct"] = clamped
+        _save_settings(existing, clerk_id)
+        logger.info("Bot risk updated for %s -> %.1f%%", clerk_id[:8], clamped)
     return {
-        "ok": True,
-        "changed": changed,
+        "ok":       True,
+        "changed":  changed,
         "risk_pct": _effective_risk_pct_display(),
-        "source": "settings.json",
+        "source":   "user_settings",
     }
 
 
@@ -2128,5 +2492,6 @@ async def health():
         "bybit_executor":       "READY" if _get_bybit_creds() else "NO_CREDS",
         "effective_risk_pct":   _effective_risk_pct_display(),
         "settings_source":      "settings.json" if _runtime_risk_pct >= 0 else "env",
+        "exit_monitor":         f"active (30s sweep, TTL={TRADE_LOCK_TTL_SECONDS//60}m)",
         "timestamp":            int(time.time()),
     }
