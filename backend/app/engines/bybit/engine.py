@@ -35,11 +35,12 @@ async def fetch_tickers(symbols: list[str]) -> dict[str, dict]:
             continue
         try:
             result[sym] = {
-                "price":    float(item.get("lastPrice",       0) or 0),
-                "high24h":  float(item.get("highPrice24h",    0) or 0),
-                "low24h":   float(item.get("lowPrice24h",     0) or 0),
-                "volume24h":float(item.get("turnover24h",     0) or 0),
-                "change24h":round(float(item.get("price24hPcnt", 0) or 0) * 100, 2),
+                "price":      float(item.get("lastPrice",       0) or 0),
+                "mark_price": float(item.get("markPrice",       0) or 0),
+                "high24h":    float(item.get("highPrice24h",    0) or 0),
+                "low24h":     float(item.get("lowPrice24h",     0) or 0),
+                "volume24h":  float(item.get("turnover24h",     0) or 0),
+                "change24h":  round(float(item.get("price24hPcnt", 0) or 0) * 100, 2),
             }
         except (ValueError, TypeError):
             pass

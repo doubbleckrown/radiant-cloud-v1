@@ -122,16 +122,35 @@ async def place_market_order(
     # CRITICAL: XAU_USD and all metals require integer unit strings — never "1.0"
     units_str = str(int(units))
     body      = {"order": {
-        "type": "MARKET", "instrument": instrument, "units": units_str,
+        "type":       "MARKET",
+        "instrument": instrument,
+        "units":      units_str,
         "stopLossOnFill":   {"price": f"{stop_loss:.{sl_dec}f}"},
         "takeProfitOnFill": {"price": f"{take_profit:.{sl_dec}f}"},
-        "timeInForce": "FOK",
+        # timeInForce deliberately omitted — Oanda MARKET orders fill
+        # immediately by default (equivalent to IOC).  Explicit "FOK"
+        # causes MARKET_ORDER_REJECT on practice accounts and during
+        # low-liquidity windows because Oanda can't guarantee a full
+        # instantaneous fill, so the order is rejected outright.
     }}
     async with httpx.AsyncClient(timeout=30) as c:
         r = await c.post(f"{OANDA_BASE}/v3/accounts/{account_id}/orders",
                          headers=_headers(api_key), json=body)
         r.raise_for_status()
-    return r.json()
+    result = r.json()
+
+    # ── Detect Oanda-level order rejection ────────────────────────────────────
+    # A rejected order returns HTTP 201 (!) with an "orderRejectTransaction"
+    # key instead of "orderFillTransaction".  raise_for_status() won't catch
+    # this — we must inspect the body.  If we don't raise here the caller
+    # reads the reject-transaction ID as the trade_id, locks the instrument
+    # with a non-existent trade, and the watcher later 404s trying to close it.
+    reject_tx = result.get("orderRejectTransaction")
+    if reject_tx:
+        reason = reject_tx.get("rejectReason") or reject_tx.get("type") or "MARKET_ORDER_REJECT"
+        raise RuntimeError(f"Oanda order rejected: {reason} [{instrument}]")
+
+    return result
 
 
 async def close_trade(api_key: str, account_id: str, trade_id: str) -> dict:
@@ -194,8 +213,31 @@ async def auto_execute(ins: str, sig_dict: dict, signal: TradeSignal) -> None:
                            "pending", sl=signal.stop_loss, tp=signal.take_profit)
         result   = await place_market_order(api_key, account_id, ins, units,
                                             signal.stop_loss, signal.take_profit)
-        fill_tx  = result.get("orderFillTransaction") or result.get("orderCreateTransaction") or {}
-        trade_id = fill_tx.get("id", "")
+
+        # ── Extract the real trade ID from the fill transaction ───────────────
+        # Oanda V20 order-fill response keys, in priority order:
+        #   orderFillTransaction.tradeOpened.tradeID  — new trade opened
+        #   orderFillTransaction.id                   — fill transaction ID
+        #   orderCreateTransaction.id                 — order created (not filled yet)
+        # We must use tradeID (not transaction ID) for close_trade() calls.
+        fill_tx  = result.get("orderFillTransaction") or {}
+        trade_id = (
+            (fill_tx.get("tradeOpened") or {}).get("tradeID")
+            or fill_tx.get("tradeID")
+            or fill_tx.get("id")
+            or ""
+        )
+
+        if not trade_id:
+            # Order was accepted (no reject tx) but no fill transaction present.
+            # This can happen for orders queued but not yet filled.
+            # Unlock immediately — the reconciliation loop will pick it up.
+            logger.warning("Oanda AutoExec %s: no tradeID in fill response — releasing lock", ins)
+            trade_tracker.unlock(ins)
+            sig_dict["exec_status"] = "failed"
+            sig_dict["exec_error"]  = "Order accepted but no fill transaction returned"
+            return
+
         trade_tracker.lock(ins, signal.direction.value, signal.entry_price,
                            trade_id, sl=signal.stop_loss, tp=signal.take_profit)
 

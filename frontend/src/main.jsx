@@ -4,12 +4,75 @@ import { ClerkProvider } from "@clerk/clerk-react";
 import App from "./App.jsx";
 import "./index.css";
 
+// ── Global SW error guard ──────────────────────────────────────────────────────
+// Must be registered BEFORE anything else so it catches SW promise rejections
+// that fire during the registration attempt (which happens in a microtask
+// before React even mounts).
+//
+// The specific message "Could not get ServiceWorkerRegistration to postMessage"
+// comes from Workbox's skipWaiting flow failing — it is non-fatal (the app
+// works fine without an SW update), but without this handler it surfaces as an
+// uncaught rejection that React's error overlay or the browser treats as a
+// fatal error, producing a blank screen.
+window.addEventListener("unhandledrejection", (event) => {
+  const msg = event?.reason?.message ?? String(event?.reason ?? "");
+  if (
+    msg.includes("ServiceWorkerRegistration") ||
+    msg.includes("postMessage") ||
+    msg.includes("service worker") ||
+    msg.includes("ServiceWorker")
+  ) {
+    // SW registration failed — app is fully functional without it.
+    console.warn("[PWA] Service worker registration issue (non-fatal):", msg);
+    event.preventDefault();   // stops the browser treating it as uncaught
+  }
+});
+
+// ── Service-worker registration (manual, non-blocking) ────────────────────────
+// We use virtual:pwa-register instead of letting VitePWA auto-inject a script.
+// Auto-injection calls postMessage with no error handling; any failure there
+// is unhandled and kills the page.  Here every failure path is caught.
+//
+// The import is wrapped in a dynamic import so a bundler error (e.g. the
+// virtual module not resolving in test/SSR environments) doesn't crash the
+// module before React mounts.
+function registerServiceWorker() {
+  if (!("serviceWorker" in navigator)) return;
+
+  import("virtual:pwa-register")
+    .then(({ registerSW }) => {
+      registerSW({
+        // Called once the SW is registered and active.
+        onRegisteredSW(swUrl, registration) {
+          console.info("[PWA] Service worker registered:", swUrl);
+
+          // Periodically check for updates (every 60 min while the tab is open).
+          if (registration) {
+            setInterval(() => {
+              registration.update().catch(() => {
+                // update() can fail if the network is offline — ignore silently.
+              });
+            }, 60 * 60 * 1000);
+          }
+        },
+
+        // Called if registration itself fails (wrong path, HTTPS issue, etc.).
+        // Log and continue — the app is fully functional without an SW.
+        onRegisterError(error) {
+          console.warn("[PWA] Service worker registration failed (non-fatal):", error);
+        },
+      });
+    })
+    .catch((err) => {
+      // The virtual:pwa-register module itself failed to load (e.g. dev mode
+      // with injectRegister:null and no sw.js built yet).  Safe to ignore.
+      console.warn("[PWA] Could not load SW register module (non-fatal):", err);
+    });
+}
+
+// ── Missing-key safety screen ─────────────────────────────────────────────────
 const PUBLISHABLE_KEY = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY;
 
-// ── Safety screen rendered when the env var is missing ────────────────────────
-// A module-level `throw` kills the entire JS bundle before React mounts,
-// producing a silent black screen.  Rendering a visible component instead
-// means developers (and users on a mis-configured deploy) see a clear message.
 function MissingKeyScreen() {
   return (
     <div style={{
@@ -24,7 +87,6 @@ function MissingKeyScreen() {
       textAlign:      "center",
       gap:            20,
     }}>
-      {/* Icon */}
       <div style={{
         width:          64,
         height:         64,
@@ -54,7 +116,6 @@ function MissingKeyScreen() {
         </p>
       </div>
 
-      {/* Code block */}
       <div style={{
         background:   "#0f0f0f",
         border:       "1px solid rgba(255,255,255,0.08)",
@@ -83,8 +144,6 @@ function MissingKeyScreen() {
 }
 
 // ── Mount ─────────────────────────────────────────────────────────────────────
-// If the key is absent, render the error screen and stop.
-// If the key is present, wrap the app in ClerkProvider as normal.
 const root = ReactDOM.createRoot(document.getElementById("root"));
 
 if (!PUBLISHABLE_KEY) {
@@ -100,4 +159,13 @@ if (!PUBLISHABLE_KEY) {
       </ClerkProvider>
     </React.StrictMode>
   );
+
+  // Register SW AFTER React mounts so a SW failure never blocks the render.
+  // requestIdleCallback (where available) defers it further until the browser
+  // is idle — keeps the initial paint fast.
+  if (typeof requestIdleCallback !== "undefined") {
+    requestIdleCallback(registerServiceWorker);
+  } else {
+    setTimeout(registerServiceWorker, 100);
+  }
 }

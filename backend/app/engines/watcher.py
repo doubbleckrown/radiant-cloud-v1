@@ -18,6 +18,8 @@ import asyncio
 import logging
 import time
 
+import httpx
+
 import app.core.state as state
 from app.core.config import TRADE_LOCK_TTL_SECONDS, EXIT_MONITOR_INTERVAL, get_bybit_creds, get_oanda_creds
 from app.core.trade_tracker import trade_tracker
@@ -61,10 +63,27 @@ async def _close_oanda(ins: str, lock: dict, reason: str) -> None:
     trade_id = lock.get("trade_id", "")
     try:
         if trade_id and trade_id != "pending":
-            await close_trade(api_key, account_id, trade_id)
+            try:
+                await close_trade(api_key, account_id, trade_id)
+                logger.info("[EXIT] Closed Oanda %s — %s  id=%s", ins, reason, trade_id)
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 404:
+                    # Trade doesn't exist on Oanda — it was either:
+                    #   a) A rejected order whose transaction ID was stored instead
+                    #      of a real trade ID (MARKET_ORDER_REJECT bug)
+                    #   b) Already closed manually or by Oanda's own SL/TP
+                    # Either way the position is gone — unlock and move on.
+                    logger.warning(
+                        "[EXIT] Oanda %s trade %s not found (404) — "
+                        "already closed or was a rejected order. Releasing lock. (%s)",
+                        ins, trade_id, reason,
+                    )
+                else:
+                    raise  # re-raise non-404 HTTP errors
             trade_tracker.unlock(ins)
-            logger.info("[EXIT] Closed Oanda %s — %s  id=%s", ins, reason, trade_id)
         else:
+            # trade_id is "pending" or empty — order may have been placed but
+            # fill transaction was never confirmed. Look up by instrument instead.
             trades = await fetch_open_trades(api_key, account_id)
             matching = [t for t in trades if t.get("instrument") == ins]
             if not matching:
@@ -74,11 +93,21 @@ async def _close_oanda(ins: str, lock: dict, reason: str) -> None:
             for t in matching:
                 tid = str(t.get("id", ""))
                 if tid:
-                    await close_trade(api_key, account_id, tid)
-                    logger.info("[EXIT] Closed Oanda %s — %s  id=%s (fallback)", ins, reason, tid)
+                    try:
+                        await close_trade(api_key, account_id, tid)
+                        logger.info("[EXIT] Closed Oanda %s — %s  id=%s (lookup)", ins, reason, tid)
+                    except httpx.HTTPStatusError as e:
+                        if e.response.status_code == 404:
+                            logger.warning("[EXIT] Oanda %s trade %s not found on close (lookup) — skipping", ins, tid)
+                        else:
+                            raise
             trade_tracker.unlock(ins)
     except Exception as exc:
         logger.error("[EXIT] Oanda close failed %s (%s): %s", ins, reason, exc)
+        # Still unlock — a permanent ghost lock blocks all future signals for
+        # this instrument.  If the trade was real, the reconciliation loop
+        # (trade_reconciliation_loop) will detect no live position and confirm.
+        trade_tracker.unlock(ins)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

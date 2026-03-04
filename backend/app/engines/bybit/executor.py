@@ -356,6 +356,32 @@ def _snap_qty(raw: float, symbol: str) -> str:
     return format(snapped, 'f')    # "0.12"   — never "1.2E-1"
 
 
+async def fetch_mark_price(symbol: str) -> float:
+    """
+    Fetch the current MarkPrice for a single linear symbol.
+    MarkPrice is what Bybit uses to trigger TP/SL — it differs from lastPrice
+    during volatile moves, so using it for validation avoids false 10001 errors.
+    Falls back to lastPrice if markPrice is absent.
+    """
+    async with httpx.AsyncClient(timeout=10) as c:
+        r = await c.get(
+            f"{BYBIT_BASE}/v5/market/tickers",
+            params={"category": "linear", "symbol": symbol},
+        )
+        r.raise_for_status()
+    data = r.json()
+    items = data.get("result", {}).get("list") or []
+    if not items or not isinstance(items[0], dict):
+        raise RuntimeError(f"mark_price: empty response for {symbol}")
+    item = items[0]
+    mark = float(item.get("markPrice", 0) or 0)
+    last = float(item.get("lastPrice",  0) or 0)
+    price = mark or last
+    if price <= 0:
+        raise RuntimeError(f"mark_price: zero price for {symbol}")
+    return price
+
+
 async def auto_execute(sym: str, sig_dict: dict, signal: TradeSignal) -> None:
     """
     Hard-automate Bybit order at 100% confluence.
@@ -376,6 +402,44 @@ async def auto_execute(sym: str, sig_dict: dict, signal: TradeSignal) -> None:
 
     api_key, secret = creds
     try:
+        # ── 1. Fetch current MarkPrice ────────────────────────────────────────
+        # Use MarkPrice (not signal.entry_price) because:
+        #   a) TP/SL triggers are evaluated against MarkPrice on Bybit
+        #   b) Market fills near MarkPrice — stale entry_price gives wrong qty
+        #   c) Bybit 10001 fires when SL/TP are on wrong side at submission time
+        #
+        # Try in-memory meta first (updated every 60s by bybit_refresh_loop),
+        # then fall back to a live API call if cache is empty or stale.
+        mark_price: float = float((state.bybit_meta.get(sym) or {}).get("mark_price") or 0)
+        if mark_price <= 0:
+            mark_price = await fetch_mark_price(sym)
+
+        # ── 2. Pre-trade SL/TP geometry check ────────────────────────────────
+        # Bybit rejects an order (10001) when SL or TP are already triggered
+        # relative to the current price at the moment of submission.
+        # For a Buy:  SL must be BELOW mark price, TP must be ABOVE.
+        # For a Sell: SL must be ABOVE mark price, TP must be BELOW.
+        sl   = signal.stop_loss
+        tp   = signal.take_profit
+        side = "Buy" if signal.direction.value == "LONG" else "Sell"
+
+        if side == "Buy":
+            valid  = sl < mark_price < tp
+            reason = f"need SL {sl:.5f} < MarkPrice {mark_price:.5f} < TP {tp:.5f}"
+        else:
+            valid  = sl > mark_price > tp
+            reason = f"need SL {sl:.5f} > MarkPrice {mark_price:.5f} > TP {tp:.5f}"
+
+        if not valid:
+            logger.warning(
+                "Bybit AutoExec SKIPPED %s %s — SL/TP geometry invalid: %s",
+                sym, side, reason,
+            )
+            sig_dict["exec_status"] = "skipped"
+            sig_dict["exec_error"]  = f"Skipped: SL/TP invalid at current price ({reason})"
+            return
+
+        # ── 3. Account equity + risk-sized qty ───────────────────────────────
         acct_data = await fetch_account(api_key, secret)
         equity    = float(acct_data.get("totalEquity", 0) or 0)
         if equity <= 0:
@@ -387,31 +451,32 @@ async def auto_execute(sym: str, sig_dict: dict, signal: TradeSignal) -> None:
         risk_pct = get_risk_pct(clerk_id, "bybit") if clerk_id else 0.10
         risk_usd = max(equity * risk_pct, 1.20)   # floor $1.20 initial margin
 
-        entry   = signal.entry_price
-        sl      = signal.stop_loss
-        tp      = signal.take_profit
-        sl_dist = abs(entry - sl)
+        # sl_dist and qty use MarkPrice so position size matches actual risk
+        sl_dist = abs(mark_price - sl)
         if sl_dist == 0:
             sig_dict["exec_status"] = "failed"
-            sig_dict["exec_error"]  = "SL equals entry"
+            sig_dict["exec_error"]  = "SL equals MarkPrice"
             return
 
-        lev      = _safe_leverage(entry, sl, BYBIT_DEFAULT_LEVERAGE)
-        qty_raw  = (risk_usd * lev) / (sl_dist * entry)
-        min_qty  = BYBIT_MIN_ORDER_QTY.get(sym, 0.001)
-        # Snap to the symbol's qtyStep (floor, not round) so Bybit never
-        # sees a qty that isn't an exact multiple → prevents retCode 10001.
-        qty_str  = _snap_qty(max(qty_raw, min_qty), sym)
-        side     = "Buy" if signal.direction.value == "LONG" else "Sell"
+        lev     = _safe_leverage(mark_price, sl, BYBIT_DEFAULT_LEVERAGE)
+        qty_raw = (risk_usd * lev) / (sl_dist * mark_price)
+        min_qty = BYBIT_MIN_ORDER_QTY.get(sym, 0.001) if isinstance(BYBIT_MIN_ORDER_QTY, dict) else 0.001
+        qty_str = _snap_qty(max(qty_raw, min_qty), sym)
 
-        trade_tracker.lock(sym, signal.direction.value, entry, "pending", sl=sl, tp=tp)
+        logger.info(
+            "Bybit AutoExec %s %s: mark=%.5f sl=%.5f tp=%.5f qty=%s lev=%d×",
+            sym, side, mark_price, sl, tp, qty_str, lev,
+        )
+
+        trade_tracker.lock(sym, signal.direction.value, mark_price, "pending", sl=sl, tp=tp)
         result   = await place_market_order(api_key, secret, sym, side, qty_str, sl, tp, lev, BYBIT_MARGIN_TYPE)
-        trade_id = result.get("result", {}).get("orderId", "")
-        trade_tracker.lock(sym, signal.direction.value, entry, trade_id, sl=sl, tp=tp)
+        trade_id = result.get("result", {}).get("orderId", "") if isinstance(result, dict) else ""
+        trade_tracker.lock(sym, signal.direction.value, mark_price, trade_id, sl=sl, tp=tp)
 
         sig_dict.update({"exec_status": "ok", "exec_order_id": trade_id,
-                         "exec_qty": qty_str, "exec_side": side})
-        logger.info("✅ BYBIT AUTO-EXEC: %s %s qty=%s lev=%d× entry=%.4f", sym, side, qty_str, lev, entry)
+                         "exec_qty": qty_str, "exec_side": side,
+                         "exec_mark_price": mark_price})
+        logger.info("✅ BYBIT AUTO-EXEC: %s %s qty=%s lev=%d× mark=%.5f", sym, side, qty_str, lev, mark_price)
 
     except Exception as exc:
         import traceback as _tb
