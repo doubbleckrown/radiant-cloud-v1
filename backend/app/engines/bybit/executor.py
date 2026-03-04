@@ -329,12 +329,28 @@ def _snap_qty(raw: float, symbol: str) -> str:
     retCode 10001 fires whenever qty is not an exact multiple of qtyStep.
     Both integers (XRPUSDT step=1) and sub-cent steps (BTCUSDT step=0.001)
     are handled correctly.  Result is never in scientific notation.
+
+    Self-contained: the step table is inline so a stale/missing config import
+    can never cause 'float has no attribute get' on the BYBIT_QTY_STEP reference.
     """
     from decimal import Decimal, ROUND_DOWN
-    step_f = BYBIT_QTY_STEP.get(symbol, 0.001)
-    step   = Decimal(str(step_f))
-    value  = Decimal(str(raw))
-    snapped = (value / step).to_integral_value(rounding=ROUND_DOWN) * step
+    # Inline step table — single source of truth mirrored from config.py.
+    # Kept here so executor.py never crashes if config is stale/wrong type.
+    _STEPS: dict[str, float] = {
+        "BTCUSDT": 0.001, "ETHUSDT": 0.01,  "SOLUSDT": 0.1,
+        "XRPUSDT": 1.0,   "BNBUSDT": 0.01,  "DOGEUSDT": 1.0,
+        "AVAXUSDT": 0.1,  "ADAUSDT": 1.0,   "DOTUSDT": 0.1,
+        "LINKUSDT": 0.01, "LTCUSDT": 0.01,  "NEARUSDT": 1.0,
+        "ATOMUSDT": 0.01, "UNIUSDT": 0.1,
+        "1000PEPEUSDT": 100.0, "1000BONKUSDT": 100.0,
+        "FARTCOINUSDT": 1.0,   "XPLUSDT": 1.0, "WLFIUSDT": 10.0,
+    }
+    # Prefer config dict if it is actually a dict (guards against stale float import)
+    step_src = BYBIT_QTY_STEP if isinstance(BYBIT_QTY_STEP, dict) else _STEPS
+    step_f   = step_src.get(symbol) or _STEPS.get(symbol, 0.001)
+    step     = Decimal(str(step_f))
+    value    = Decimal(str(raw))
+    snapped  = (value / step).to_integral_value(rounding=ROUND_DOWN) * step
     if step >= 1:
         return str(int(snapped))   # "14340"  — no decimal, no scientific notation
     return format(snapped, 'f')    # "0.12"   — never "1.2E-1"

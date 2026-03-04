@@ -39,7 +39,6 @@ BYBIT_API_SECRET     = os.getenv("BYBIT_API_SECRET", "")
 BYBIT_DEFAULT_LEVERAGE = int(os.getenv("BYBIT_DEFAULT_LEVERAGE", "20"))
 BYBIT_MARGIN_TYPE    = os.getenv("BYBIT_MARGIN_TYPE", "ISOLATED")
 BYBIT_RECV_WINDOW    = "5000"
-BYBIT_QTY_STEP = 0.1
 
 BYBIT_SYMBOLS: list[str] = [
     "BTCUSDT","ETHUSDT","SOLUSDT","XRPUSDT","BNBUSDT",
@@ -55,6 +54,31 @@ BYBIT_MIN_ORDER_QTY: dict[str, float] = {
     "1000PEPEUSDT":100.0,"1000BONKUSDT":100.0,"FARTCOINUSDT":1.0,
     "XPLUSDT":1.0,"WLFIUSDT":10.0,
 }
+# Per-symbol quantity step size.  qty sent to Bybit MUST be an exact multiple.
+# Formula: qty_str = floor(raw / step) * step, formatted to step's decimal places.
+# Source: Bybit V5 GET /v5/market/instruments-info (contractType=LinearPerpetual)
+BYBIT_QTY_STEP: dict[str, float] = {
+    "BTCUSDT":       0.001,   # 3 dp
+    "ETHUSDT":       0.01,    # 2 dp
+    "SOLUSDT":       0.1,     # 1 dp
+    "XRPUSDT":       1.0,     # 0 dp
+    "BNBUSDT":       0.01,    # 2 dp
+    "DOGEUSDT":      1.0,     # 0 dp
+    "AVAXUSDT":      0.1,     # 1 dp
+    "ADAUSDT":       1.0,     # 0 dp
+    "DOTUSDT":       0.1,     # 1 dp
+    "LINKUSDT":      0.01,    # 2 dp
+    "LTCUSDT":       0.01,    # 2 dp  ← was sending 3dp → 10001 qty invalid
+    "NEARUSDT":      1.0,     # 0 dp
+    "ATOMUSDT":      0.01,    # 2 dp
+    "UNIUSDT":       0.1,     # 1 dp
+    "1000PEPEUSDT":  100.0,   # 0 dp  (multiples of 100)
+    "1000BONKUSDT":  100.0,   # 0 dp
+    "FARTCOINUSDT":  1.0,     # 0 dp
+    "XPLUSDT":       1.0,     # 0 dp
+    "WLFIUSDT":      10.0,    # 0 dp  (multiples of 10)
+}
+
 BYBIT_INTERVALS: list[str] = ["60", "15", "5", "1"]
 
 CLERK_JWKS_URL = os.getenv("CLERK_JWKS_URL","https://immune-donkey-10.clerk.accounts.dev/.well-known/jwks.json")
