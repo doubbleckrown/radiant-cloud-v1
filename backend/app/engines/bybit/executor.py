@@ -22,10 +22,11 @@ from typing import Any
 
 import httpx
 
+
 from app.core.config import (
     BYBIT_BASE, BYBIT_RECV_WINDOW,
     BYBIT_DEFAULT_LEVERAGE, BYBIT_MARGIN_TYPE,
-    BYBIT_MIN_ORDER_QTY, get_bybit_creds,
+    BYBIT_MIN_ORDER_QTY, BYBIT_QTY_STEP, get_bybit_creds,
 )
 from app.core.trade_tracker import trade_tracker
 from app.services.strategy import TradeSignal
@@ -187,8 +188,13 @@ async def _set_margin_mode(api_key: str, secret: str, symbol: str,
             r = await c.post(f"{BYBIT_BASE}/v5/position/switch-isolated",
                              headers=headers, content=body_str)
         d = r.json()
-        if d.get("retCode", -1) not in (0, 110043):
-            logger.warning("set_margin_mode %s: %s %s", symbol, d.get("retCode"), d.get("retMsg"))
+        code = d.get("retCode", -1)
+        if code not in (0, 110043, 100028):
+            # 100028 = Unified Trading Account — switch-isolated is a Classic-only
+            # endpoint. UTA ignores it; leverage is set directly via set-leverage.
+            logger.warning("set_margin_mode %s: %s %s", symbol, code, d.get("retMsg"))
+        elif code == 100028:
+            logger.debug("set_margin_mode %s: UTA account — skip switch-isolated (ok)", symbol)
     except Exception as e:
         logger.warning("set_margin_mode %s: %s", symbol, e)
 
@@ -205,8 +211,15 @@ async def _set_leverage(api_key: str, secret: str, symbol: str,
         r = await c.post(f"{BYBIT_BASE}/v5/position/set-leverage",
                          headers=headers, content=body_str)
     d = r.json()
-    if d.get("retCode", -1) not in (0, 110043):
-        logger.warning("set_leverage %s: %s %s", symbol, d.get("retCode"), d.get("retMsg"))
+    code2 = d.get("retCode", -1)
+    if code2 not in (0, 110043, 100028):
+        # 0      = success
+        # 110043 = leverage unchanged (already at this value)
+        # 100028 = UTA accounts: isolated set-leverage is Classic-only; UTA
+        #          manages leverage per-position via the order directly — skip silently
+        logger.warning("set_leverage %s: %s %s", symbol, code2, d.get("retMsg"))
+    elif code2 == 100028:
+        logger.debug("set_leverage %s: UTA account — isolated leverage skipped (ok)", symbol)
 
 
 async def place_market_order(
@@ -282,6 +295,28 @@ def _safe_leverage(entry: float, sl: float, leverage: int) -> int:
     return leverage
 
 
+def _snap_qty(raw: float, symbol: str) -> str:
+    """
+    Floor qty to the nearest valid step using Decimal arithmetic.
+
+    float-based math.floor is unreliable for small steps — e.g.
+    math.floor(0.12 / 0.01) can return 11 in some Python builds due to FP
+    representation (0.12 / 0.01 evaluates to 11.999…).  Decimal avoids this.
+
+    retCode 10001 fires whenever qty is not an exact multiple of qtyStep.
+    Both integers (XRPUSDT step=1) and sub-cent steps (BTCUSDT step=0.001)
+    are handled correctly.  Result is never in scientific notation.
+    """
+    from decimal import Decimal, ROUND_DOWN
+    step_f = BYBIT_QTY_STEP.get(symbol, 0.001)
+    step   = Decimal(str(step_f))
+    value  = Decimal(str(raw))
+    snapped = (value / step).to_integral_value(rounding=ROUND_DOWN) * step
+    if step >= 1:
+        return str(int(snapped))   # "14340"  — no decimal, no scientific notation
+    return format(snapped, 'f')    # "0.12"   — never "1.2E-1"
+
+
 async def auto_execute(sym: str, sig_dict: dict, signal: TradeSignal) -> None:
     """
     Hard-automate Bybit order at 100% confluence.
@@ -325,17 +360,19 @@ async def auto_execute(sym: str, sig_dict: dict, signal: TradeSignal) -> None:
         lev      = _safe_leverage(entry, sl, BYBIT_DEFAULT_LEVERAGE)
         qty_raw  = (risk_usd * lev) / (sl_dist * entry)
         min_qty  = BYBIT_MIN_ORDER_QTY.get(sym, 0.001)
-        qty      = max(round(qty_raw, 3), min_qty)
+        # Snap to the symbol's qtyStep (floor, not round) so Bybit never
+        # sees a qty that isn't an exact multiple → prevents retCode 10001.
+        qty_str  = _snap_qty(max(qty_raw, min_qty), sym)
         side     = "Buy" if signal.direction.value == "LONG" else "Sell"
 
         trade_tracker.lock(sym, signal.direction.value, entry, "pending", sl=sl, tp=tp)
-        result   = await place_market_order(api_key, secret, sym, side, str(qty), sl, tp, lev, BYBIT_MARGIN_TYPE)
+        result   = await place_market_order(api_key, secret, sym, side, qty_str, sl, tp, lev, BYBIT_MARGIN_TYPE)
         trade_id = result.get("result", {}).get("orderId", "")
         trade_tracker.lock(sym, signal.direction.value, entry, trade_id, sl=sl, tp=tp)
 
         sig_dict.update({"exec_status": "ok", "exec_order_id": trade_id,
-                         "exec_qty": qty, "exec_side": side})
-        logger.info("✅ BYBIT AUTO-EXEC: %s %s qty=%.3f lev=%d× entry=%.4f", sym, side, qty, lev, entry)
+                         "exec_qty": qty_str, "exec_side": side})
+        logger.info("✅ BYBIT AUTO-EXEC: %s %s qty=%s lev=%d× entry=%.4f", sym, side, qty_str, lev, entry)
 
     except Exception as exc:
         err = str(exc)
