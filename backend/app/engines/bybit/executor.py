@@ -30,6 +30,7 @@ from app.core.config import (
 )
 from app.core.trade_tracker import trade_tracker
 from app.services.strategy import TradeSignal
+from app.engines.sl_tp import candle_anchor_levels
 import app.core.state as state
 
 logger = logging.getLogger("fx-signal")
@@ -415,29 +416,27 @@ async def auto_execute(sym: str, sig_dict: dict, signal: TradeSignal) -> None:
         if mark_price <= 0:
             mark_price = await fetch_mark_price(sym)
 
-        # ── 2. Pre-trade SL/TP geometry check ────────────────────────────────
-        # Bybit rejects an order (10001) when SL or TP are already triggered
-        # relative to the current price at the moment of submission.
-        # For a Buy:  SL must be BELOW mark price, TP must be ABOVE.
-        # For a Sell: SL must be ABOVE mark price, TP must be BELOW.
-        sl   = signal.stop_loss
-        tp   = signal.take_profit
-        side = "Buy" if signal.direction.value == "LONG" else "Sell"
+        # ── 2. Candle-Anchor SL/TP ────────────────────────────────────────────
+        # Recalculate SL/TP at execution time from the MarkPrice and the
+        # previous H1 candle's Low (Buy) or High (Sell) as the structural anchor.
+        # This replaces the SMC engine's stale theoretical levels and guarantees
+        # geometry is valid relative to the *current* price, not the signal price.
+        is_long = signal.direction.value == "LONG"
+        side    = "Buy" if is_long else "Sell"
+        h1_candles = state.bybit_candle_cache.get(sym, {}).get("60", [])
 
-        if side == "Buy":
-            valid  = sl < mark_price < tp
-            reason = f"need SL {sl:.5f} < MarkPrice {mark_price:.5f} < TP {tp:.5f}"
-        else:
-            valid  = sl > mark_price > tp
-            reason = f"need SL {sl:.5f} > MarkPrice {mark_price:.5f} > TP {tp:.5f}"
-
-        if not valid:
-            logger.warning(
-                "Bybit AutoExec SKIPPED %s %s — SL/TP geometry invalid: %s",
-                sym, side, reason,
+        try:
+            sl, tp, sl_dist = candle_anchor_levels(
+                candles    = h1_candles,
+                mark_price = mark_price,
+                is_long    = is_long,
+                instrument = sym,
+                is_bybit   = True,
             )
+        except ValueError as ve:
+            logger.warning("Bybit AutoExec SKIPPED %s %s — candle anchor: %s", sym, side, ve)
             sig_dict["exec_status"] = "skipped"
-            sig_dict["exec_error"]  = f"Skipped: SL/TP invalid at current price ({reason})"
+            sig_dict["exec_error"]  = f"Skipped: {ve}"
             return
 
         # ── 3. Account equity + risk-sized qty ───────────────────────────────
@@ -452,21 +451,14 @@ async def auto_execute(sym: str, sig_dict: dict, signal: TradeSignal) -> None:
         risk_pct = get_risk_pct(clerk_id, "bybit") if clerk_id else 0.10
         risk_usd = max(equity * risk_pct, 1.20)   # floor $1.20 initial margin
 
-        # sl_dist and qty use MarkPrice so position size matches actual risk
-        sl_dist = abs(mark_price - sl)
-        if sl_dist == 0:
-            sig_dict["exec_status"] = "failed"
-            sig_dict["exec_error"]  = "SL equals MarkPrice"
-            return
-
         lev     = _safe_leverage(mark_price, sl, BYBIT_DEFAULT_LEVERAGE)
         qty_raw = (risk_usd * lev) / (sl_dist * mark_price)
         min_qty = BYBIT_MIN_ORDER_QTY.get(sym, 0.001) if isinstance(BYBIT_MIN_ORDER_QTY, dict) else 0.001
         qty_str = _snap_qty(max(qty_raw, min_qty), sym)
 
         logger.info(
-            "Bybit AutoExec %s %s: mark=%.5f sl=%.5f tp=%.5f qty=%s lev=%d×",
-            sym, side, mark_price, sl, tp, qty_str, lev,
+            "Bybit AutoExec %s %s: mark=%.5f sl=%.5f tp=%.5f sl_dist=%.5f qty=%s lev=%d×",
+            sym, side, mark_price, sl, tp, sl_dist, qty_str, lev,
         )
 
         trade_tracker.lock(sym, signal.direction.value, mark_price, "pending", sl=sl, tp=tp)
@@ -474,10 +466,17 @@ async def auto_execute(sym: str, sig_dict: dict, signal: TradeSignal) -> None:
         trade_id = result.get("result", {}).get("orderId", "") if isinstance(result, dict) else ""
         trade_tracker.lock(sym, signal.direction.value, mark_price, trade_id, sl=sl, tp=tp)
 
-        sig_dict.update({"exec_status": "ok", "exec_order_id": trade_id,
-                         "exec_qty": qty_str, "exec_side": side,
-                         "exec_mark_price": mark_price})
-        logger.info("✅ BYBIT AUTO-EXEC: %s %s qty=%s lev=%d× mark=%.5f", sym, side, qty_str, lev, mark_price)
+        sig_dict.update({
+            "exec_status":    "ok",
+            "exec_order_id":  trade_id,
+            "exec_qty":       qty_str,
+            "exec_side":      side,
+            "exec_mark_price": mark_price,
+            "exec_sl":        sl,
+            "exec_tp":        tp,
+        })
+        logger.info("✅ BYBIT AUTO-EXEC: %s %s qty=%s lev=%d× mark=%.5f sl=%.5f tp=%.5f",
+                    sym, side, qty_str, lev, mark_price, sl, tp)
 
     except Exception as exc:
         import traceback as _tb

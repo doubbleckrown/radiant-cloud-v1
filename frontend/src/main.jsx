@@ -5,15 +5,16 @@ import App from "./App.jsx";
 import "./index.css";
 
 // ── Global SW error guard ──────────────────────────────────────────────────────
-// Must be registered BEFORE anything else so it catches SW promise rejections
-// that fire during the registration attempt (which happens in a microtask
-// before React even mounts).
+// Catches any SW-related unhandled promise rejections so they never surface
+// as a blank screen.  Must be the very first thing that runs.
 //
-// The specific message "Could not get ServiceWorkerRegistration to postMessage"
-// comes from Workbox's skipWaiting flow failing — it is non-fatal (the app
-// works fine without an SW update), but without this handler it surfaces as an
-// uncaught rejection that React's error overlay or the browser treats as a
-// fatal error, producing a blank screen.
+// With injectRegister:"auto", VitePWA injects a synchronous <script> into
+// index.html that registers the SW directly — no workbox-window, no lazy
+// class instantiation, so the "message handler must be added on initial
+// evaluation" timing error is eliminated at source.
+// This guard is kept as a belt-and-suspenders fallback for edge cases
+// (HTTPS cert delays, CDN path issues, etc.) that can still produce
+// unhandled rejections from the injected registration script.
 window.addEventListener("unhandledrejection", (event) => {
   const msg = event?.reason?.message ?? String(event?.reason ?? "");
   if (
@@ -22,53 +23,17 @@ window.addEventListener("unhandledrejection", (event) => {
     msg.includes("service worker") ||
     msg.includes("ServiceWorker")
   ) {
-    // SW registration failed — app is fully functional without it.
-    console.warn("[PWA] Service worker registration issue (non-fatal):", msg);
-    event.preventDefault();   // stops the browser treating it as uncaught
+    console.warn("[PWA] Service worker issue (non-fatal, app fully functional):", msg);
+    event.preventDefault();
   }
 });
 
-// ── Service-worker registration (manual, non-blocking) ────────────────────────
-// We use virtual:pwa-register instead of letting VitePWA auto-inject a script.
-// Auto-injection calls postMessage with no error handling; any failure there
-// is unhandled and kills the page.  Here every failure path is caught.
-//
-// The import is wrapped in a dynamic import so a bundler error (e.g. the
-// virtual module not resolving in test/SSR environments) doesn't crash the
-// module before React mounts.
-function registerServiceWorker() {
-  if (!("serviceWorker" in navigator)) return;
-
-  import("virtual:pwa-register")
-    .then(({ registerSW }) => {
-      registerSW({
-        // Called once the SW is registered and active.
-        onRegisteredSW(swUrl, registration) {
-          console.info("[PWA] Service worker registered:", swUrl);
-
-          // Periodically check for updates (every 60 min while the tab is open).
-          if (registration) {
-            setInterval(() => {
-              registration.update().catch(() => {
-                // update() can fail if the network is offline — ignore silently.
-              });
-            }, 60 * 60 * 1000);
-          }
-        },
-
-        // Called if registration itself fails (wrong path, HTTPS issue, etc.).
-        // Log and continue — the app is fully functional without an SW.
-        onRegisterError(error) {
-          console.warn("[PWA] Service worker registration failed (non-fatal):", error);
-        },
-      });
-    })
-    .catch((err) => {
-      // The virtual:pwa-register module itself failed to load (e.g. dev mode
-      // with injectRegister:null and no sw.js built yet).  Safe to ignore.
-      console.warn("[PWA] Could not load SW register module (non-fatal):", err);
-    });
-}
+// ── NOTE: No manual SW registration here ──────────────────────────────────────
+// With injectRegister:"auto" in vite.config.js, VitePWA injects a tiny
+// synchronous <script> into the built index.html that registers /sw.js.
+// Adding a SECOND registration call here via virtual:pwa-register would create
+// a race condition and re-introduce the message-handler timing error we just
+// fixed.  Leave SW lifecycle entirely to VitePWA's injected script.
 
 // ── Missing-key safety screen ─────────────────────────────────────────────────
 const PUBLISHABLE_KEY = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY;
@@ -159,13 +124,4 @@ if (!PUBLISHABLE_KEY) {
       </ClerkProvider>
     </React.StrictMode>
   );
-
-  // Register SW AFTER React mounts so a SW failure never blocks the render.
-  // requestIdleCallback (where available) defers it further until the browser
-  // is idle — keeps the initial paint fast.
-  if (typeof requestIdleCallback !== "undefined") {
-    requestIdleCallback(registerServiceWorker);
-  } else {
-    setTimeout(registerServiceWorker, 100);
-  }
 }

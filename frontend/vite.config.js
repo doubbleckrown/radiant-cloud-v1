@@ -12,22 +12,33 @@ export default defineConfig(({ mode }) => {
     plugins: [
       react(),
       VitePWA({
-        // ── CRITICAL: disable the auto-injected registration script ──────────
-        // registerType: "autoUpdate" injects a script that calls
-        // registration.waiting.postMessage({ type: 'SKIP_WAITING' }) with no
-        // error handling.  On Render, if the SW can't register (wrong path,
-        // HTTPS timing, CDN edge) this becomes an unhandled promise rejection
-        // that fires before React mounts → blank screen.
+        // ── GenerateSW mode (default) ─────────────────────────────────────────
+        // Workbox auto-generates sw.js containing:
+        //   precacheAndRoute(self.__WB_MANIFEST)
+        //   self.addEventListener('message', ...) ← top-level, always synchronous
         //
-        // "prompt" skips the postMessage entirely.  We handle registration
-        // manually in main.jsx with a full try/catch via virtual:pwa-register.
+        // "prompt" means: do NOT call self.skipWaiting() automatically.
+        // Instead the generated SW waits for a SKIP_WAITING postMessage.
+        // The injected registration script (injectRegister:"auto") sends that
+        // message when appropriate — no workbox-window, no timing ambiguity.
         registerType: "prompt",
 
-        // ── Disable auto-injection — we register manually in main.jsx ────────
-        // injectRegister: null means VitePWA does NOT inject any <script> tag.
-        // The registerSW() call in main.jsx is the sole registration point,
-        // so we control the error boundary around it.
-        injectRegister: null,
+        // ── injectRegister: "auto" — the critical change from our last fix ────
+        // Previously we used injectRegister:null + virtual:pwa-register in
+        // main.jsx.  That routes through workbox-window which instantiates a
+        // Workbox class inside a lazy .then() callback, then calls postMessage
+        // on the waiting SW.  Chrome fires:
+        //   "Event handler of 'message' event must be added on the initial
+        //    evaluation of worker script"
+        // because the message arrives while the SW may still be activating and
+        // the browser can't confirm the listener was registered synchronously.
+        //
+        // "auto" makes VitePWA inject a tiny SYNCHRONOUS <script> into index.html
+        // that calls navigator.serviceWorker.register('/sw.js') directly.
+        // No workbox-window. No class instantiation. No timing gap.
+        // The SW's top-level message listener is always fully parsed before
+        // any postMessage is ever sent.
+        injectRegister: "auto",
 
         includeAssets: ["favicon.svg", "icon-192.png", "icon-512.png"],
 
@@ -49,19 +60,16 @@ export default defineConfig(({ mode }) => {
         workbox: {
           globPatterns: ["**/*.{js,css,html,ico,png,svg,woff2}"],
 
-          // ── navigateFallback guard ────────────────────────────────────────
-          // Without a denylist the SW intercepts every URL including /api/*
-          // and /ws — returning index.html for API requests breaks the app
-          // on Render where static assets and the API are on different hosts.
+          // Prevents the SW intercepting backend API calls and returning
+          // index.html for them (breaks Render's separate static/API origins).
           navigateFallback: "index.html",
           navigateFallbackDenylist: [
-            /^\/api\//,      // backend REST routes
-            /^\/ws/,         // WebSocket upgrade path
-            /\.[a-z]+$/i,    // any URL with a file extension (assets)
+            /^\/api\//,       // backend REST routes
+            /^\/ws/,          // WebSocket upgrade path
+            /\.[a-z0-9]+$/i,  // any URL with a file extension (assets)
           ],
 
-          // Evict caches from old SW versions so a previously broken SW
-          // doesn't serve stale assets after a deploy.
+          // Evict caches from old SW versions after a deploy.
           cleanupOutdatedCaches: true,
 
           runtimeCaching: [

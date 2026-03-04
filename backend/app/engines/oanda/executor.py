@@ -20,6 +20,8 @@ from app.core.config import (
 from app.core.trade_tracker import trade_tracker
 from app.core.alerts import push_notification
 from app.services.strategy import Candle, TradeSignal
+from app.engines.sl_tp import candle_anchor_levels
+import app.core.state as state
 
 logger = logging.getLogger("fx-signal")
 
@@ -202,44 +204,43 @@ async def auto_execute(ins: str, sig_dict: dict, signal: TradeSignal) -> None:
         risk_usd = nav * risk_pct
 
         is_long  = signal.direction.value == "LONG"
-        entry    = signal.entry_price
-        sl       = signal.stop_loss
-        tp       = signal.take_profit
 
-        # ── Pre-trade SL/TP geometry check ───────────────────────────────────
-        # Oanda silently accepts an order where SL/TP are on the wrong side of
-        # the entry price, but returns no orderFillTransaction (the order either
-        # triggers immediately or is queued incorrectly).  Catch this before
-        # touching the API — the strategy engine occasionally produces an
-        # inverted signal during fast moves where the price has already passed
-        # the intended entry level.
+        # ── Candle-Anchor SL/TP ───────────────────────────────────────────────
+        # Recalculate SL/TP fresh at execution time using the current live price
+        # and the previous H1 candle's Low (Buy) or High (Sell) as the anchor.
+        # This replaces the SMC engine's theoretical levels which may be stale.
         #
-        # LONG:  SL must be below entry, TP must be above entry
-        # SHORT: SL must be above entry, TP must be below entry
-        if is_long:
-            geo_valid = sl < entry < tp
-            geo_reason = f"LONG needs SL {sl:.5f} < entry {entry:.5f} < TP {tp:.5f}"
-        else:
-            geo_valid = sl > entry > tp
-            geo_reason = f"SHORT needs SL {sl:.5f} > entry {entry:.5f} > TP {tp:.5f}"
+        # Live bid/ask midpoint from the SSE price stream (updated every tick).
+        # Falls back to signal.entry_price only if the price stream has a gap.
+        live_price = float(state.latest_prices.get(ins) or signal.entry_price)
+        h1_candles = state.candle_cache.get(ins, {}).get("H1", [])
 
-        if not geo_valid:
-            logger.warning(
-                "Oanda AutoExec SKIPPED %s — SL/TP geometry invalid: %s",
-                ins, geo_reason,
+        try:
+            sl, tp, sl_dist = candle_anchor_levels(
+                candles    = h1_candles,
+                mark_price = live_price,
+                is_long    = is_long,
+                instrument = ins,
+                is_bybit   = False,
             )
+        except ValueError as ve:
+            logger.warning("Oanda AutoExec SKIPPED %s — candle anchor: %s", ins, ve)
             sig_dict["exec_status"] = "skipped"
-            sig_dict["exec_error"]  = f"Skipped: SL/TP invalid vs entry ({geo_reason})"
+            sig_dict["exec_error"]  = f"Skipped: {ve}"
             return
 
-        sl_dist  = abs(entry - sl)
-        units    = _compute_units(ins, risk_usd, sl_dist, is_long)
+        logger.info(
+            "Oanda AutoExec %s %s: live=%.5f sl=%.5f tp=%.5f sl_dist=%.5f",
+            ins, "LONG" if is_long else "SHORT", live_price, sl, tp, sl_dist,
+        )
+
+        units = _compute_units(ins, risk_usd, sl_dist, is_long)
         if units == 0:
             sig_dict["exec_status"] = "failed"
             sig_dict["exec_error"]  = "Computed 0 units — SL distance too small"
             return
 
-        trade_tracker.lock(ins, signal.direction.value, entry,
+        trade_tracker.lock(ins, signal.direction.value, live_price,
                            "pending", sl=sl, tp=tp)
         result   = await place_market_order(api_key, account_id, ins, units,
                                             sl, tp)
@@ -268,13 +269,19 @@ async def auto_execute(ins: str, sig_dict: dict, signal: TradeSignal) -> None:
             sig_dict["exec_error"]  = "Order accepted but no fill transaction returned"
             return
 
-        trade_tracker.lock(ins, signal.direction.value, entry,
+        trade_tracker.lock(ins, signal.direction.value, live_price,
                            trade_id, sl=sl, tp=tp)
 
-        sig_dict["exec_status"]   = "ok"
-        sig_dict["exec_trade_id"] = trade_id
-        sig_dict["exec_units"]    = units
-        logger.info("✅ OANDA AUTO-EXEC: %s  units=%d  id=%s", ins, units, trade_id)
+        sig_dict.update({
+            "exec_status":   "ok",
+            "exec_trade_id": trade_id,
+            "exec_units":    units,
+            "exec_sl":       sl,
+            "exec_tp":       tp,
+            "exec_price":    live_price,
+        })
+        logger.info("✅ OANDA AUTO-EXEC: %s  units=%d  id=%s  sl=%.5f  tp=%.5f",
+                    ins, units, trade_id, sl, tp)
 
     except Exception as exc:
         err = str(exc)
