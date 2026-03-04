@@ -1,92 +1,74 @@
 """
-FX Radiant — Core Configuration
-================================
-All environment variables are read from your .env file through
-Pydantic's BaseSettings. Every other file imports from here —
-this is the single source of truth for all configuration values.
-
-Usage in any file:
-    from app.core.config import settings
-    print(settings.OANDA_API_KEY)
+app/core/config.py — Single source of truth for all constants and env bindings.
 """
-
 from __future__ import annotations
-from functools import lru_cache
-from typing import List
-from pydantic_settings import BaseSettings, SettingsConfigDict
+import os
+from pathlib import Path
 
+try:
+    from dotenv import load_dotenv
+    _env_path = Path(__file__).resolve().parents[3] / ".env"
+    load_dotenv(_env_path, override=False)
+except ImportError:
+    pass
 
-class Settings(BaseSettings):
-    """
-    All values are read automatically from your .env file.
-    If a value is missing from .env, the default shown here is used.
-    """
+OANDA_API_KEY  = os.getenv("OANDA_API_KEY",   "")
+OANDA_ACCOUNT  = os.getenv("OANDA_ACCOUNT_ID", "")
+OANDA_BASE     = os.getenv("OANDA_BASE_URL",   "https://api-fxpractice.oanda.com")
+OANDA_STREAM   = os.getenv("OANDA_STREAM_URL", "https://stream-fxpractice.oanda.com")
 
-    # ── Application ───────────────────────────────────────────────────────
-    APP_NAME:    str = "FX Radiant"
-    APP_VERSION: str = "1.0.0"
-    DEBUG:       bool = False
+INSTRUMENTS: list[str] = [
+    "EUR_USD","GBP_USD","USD_JPY","AUD_USD","NZD_USD",
+    "USD_CAD","EUR_GBP","GBP_JPY","EUR_JPY","AUD_CAD",
+    "XAU_USD","XAG_USD","XPT_USD",
+    "NAS100_USD","SPX500_USD","US30_USD",
+]
+GRANULARITIES: list[str] = ["M1", "M5", "M15", "H1"]
+OANDA_MIN_UNITS: dict[str, int] = {
+    "XAU_USD":1,"XAG_USD":1,"XPT_USD":1,
+    "NAS100_USD":1,"SPX500_USD":1,"US30_USD":1,
+}
+OANDA_SL_DECIMALS: dict[str, int] = {
+    "XAU_USD":3,"XAG_USD":3,"XPT_USD":3,
+    "NAS100_USD":1,"SPX500_USD":1,"US30_USD":1,
+}
 
-    # ── Security / JWT ────────────────────────────────────────────────────
-    SECRET_KEY:  str = "change-this-to-a-long-random-secret-in-production"
-    ALGORITHM:   str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES:  int = 30
-    REFRESH_TOKEN_EXPIRE_DAYS:    int = 7
+BYBIT_BASE           = "https://api.bybit.com"
+BYBIT_API_KEY        = os.getenv("BYBIT_API_KEY",    "")
+BYBIT_API_SECRET     = os.getenv("BYBIT_API_SECRET", "")
+BYBIT_DEFAULT_LEVERAGE = int(os.getenv("BYBIT_DEFAULT_LEVERAGE", "20"))
+BYBIT_MARGIN_TYPE    = os.getenv("BYBIT_MARGIN_TYPE", "ISOLATED")
+BYBIT_RECV_WINDOW    = "5000"
 
-    # ── Oanda v20 API ─────────────────────────────────────────────────────
-    OANDA_API_KEY:    str = ""
-    OANDA_ACCOUNT_ID: str = ""
-    OANDA_BASE_URL:   str = "https://api-fxpractice.oanda.com"
-    OANDA_STREAM_URL: str = "https://stream-fxpractice.oanda.com"
+BYBIT_SYMBOLS: list[str] = [
+    "BTCUSDT","ETHUSDT","SOLUSDT","XRPUSDT","BNBUSDT",
+    "DOGEUSDT","AVAXUSDT","ADAUSDT","DOTUSDT","LINKUSDT",
+    "LTCUSDT","NEARUSDT","ATOMUSDT","UNIUSDT",
+    "1000PEPEUSDT","1000BONKUSDT","FARTCOINUSDT","XPLUSDT","WLFIUSDT",
+]
+BYBIT_MIN_ORDER_QTY: dict[str, float] = {
+    "BTCUSDT":0.001,"ETHUSDT":0.01,"SOLUSDT":0.1,"XRPUSDT":10.0,
+    "BNBUSDT":0.01,"DOGEUSDT":100.0,"AVAXUSDT":0.1,"ADAUSDT":10.0,
+    "DOTUSDT":1.0,"LINKUSDT":1.0,"LTCUSDT":0.1,"NEARUSDT":1.0,
+    "ATOMUSDT":1.0,"UNIUSDT":1.0,
+    "1000PEPEUSDT":100.0,"1000BONKUSDT":100.0,"FARTCOINUSDT":1.0,
+    "XPLUSDT":1.0,"WLFIUSDT":10.0,
+}
+BYBIT_INTERVALS: list[str] = ["60", "15", "5", "1"]
 
-    # ── Trading instruments ───────────────────────────────────────────────
-    INSTRUMENTS: List[str] = [
-        "EUR_USD",
-        "GBP_USD",
-        "USD_JPY",
-        "XAU_USD",
-        "NAS100_USD",
-    ]
-    GRANULARITIES: List[str] = ["M5", "M15", "H1"]
+CLERK_JWKS_URL = os.getenv("CLERK_JWKS_URL","https://immune-donkey-10.clerk.accounts.dev/.well-known/jwks.json")
+ONESIGNAL_APP_ID   = os.getenv("ONESIGNAL_APP_ID",  "")
+ONESIGNAL_REST_KEY = os.getenv("ONESIGNAL_REST_KEY", "")
+TRADE_LOCK_TTL_SECONDS = 7200
+EXIT_MONITOR_INTERVAL  = 30
+BOT_RISK_PCT = float(os.getenv("BOT_RISK_PCT", "10.0"))
 
-    # ── SMC Engine defaults ───────────────────────────────────────────────
-    EMA_PERIOD:           int   = 200
-    EMA_HYSTERESIS_PCT:   float = 0.0001   # 0.01% dead-zone
-    SWING_LOOKBACK:       int   = 5
-    DEFAULT_RR_RATIO:     float = 2.0
-    SL_BUFFER_PCT:        float = 0.0002   # 0.02% beyond swing
-    OB_LOOKBACK:          int   = 50
-    FVG_LOOKBACK:         int   = 50
+def get_oanda_creds() -> tuple[str, str] | None:
+    k = os.environ.get("OANDA_API_KEY","").strip()
+    a = os.environ.get("OANDA_ACCOUNT_ID","").strip()
+    return (k, a) if (k and a) else None
 
-    # ── CORS ──────────────────────────────────────────────────────────────
-    # Stored as a plain comma-separated string to avoid pydantic-settings
-    # List parsing issues with .env files.
-    # main.py uses ["*"] for development so this is a production reference.
-    CORS_ORIGINS_STR: str = "http://localhost:5173,http://localhost:4173,http://127.0.0.1:5173"
-
-    # ── Pydantic Settings config ──────────────────────────────────────────
-    model_config = SettingsConfigDict(
-        env_file=".env",
-        env_file_encoding="utf-8",
-        case_sensitive=True,
-        extra="ignore",
-    )
-
-    def get_cors_origins(self) -> List[str]:
-        """Parse the comma-separated CORS_ORIGINS_STR into a list."""
-        return [o.strip() for o in self.CORS_ORIGINS_STR.split(",") if o.strip()]
-
-
-@lru_cache()
-def get_settings() -> Settings:
-    """
-    Returns a cached singleton of Settings.
-    Use this function everywhere instead of creating Settings() directly.
-    The @lru_cache means the .env file is only read once on startup.
-    """
-    return Settings()
-
-
-# Convenience singleton — import this in other files:
-#   from app.core.config import settings
-settings = get_settings()
+def get_bybit_creds() -> tuple[str, str] | None:
+    k = os.environ.get("BYBIT_API_KEY","").strip()
+    s = os.environ.get("BYBIT_API_SECRET","").strip()
+    return (k, s) if (k and s) else None

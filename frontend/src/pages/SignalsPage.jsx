@@ -172,13 +172,17 @@ export default function SignalsPage() {
   //   1. Signal was 100% confluence (only 100% signals are real trade setups)
   //   2. Instrument is currently locked  OR  signal is within the 2h TTL window
   // If the market has moved below 100%, the signal drops from Active automatically.
+  // ACTIVE TAB: 100% confluence + instrument locked OR recent + NOT failed
+  // If execution failed, signal moves to History immediately (no lingering in Active)
   const activeSignals  = signals.filter(s => {
-    if ((s.confidence ?? 0) < 100) return false;   // ← non-100% never show as active
+    if ((s.confidence ?? 0) < 100) return false;
+    if (s.exec_status === "failed")  return false;  // ← FAILED → History tab immediately
     const sym = s.instrument ?? s.symbol ?? "";
     return Boolean(tradeLocks[sym]) || isRecent(s);
   });
-  // History = everything else (sub-100% setups, expired locks, old 100% signals)
+  // HISTORY TAB: everything else — sub-100%, failed executions, expired 100% signals
   const historySignals = signals.filter(s => {
+    if (s.exec_status === "failed") return true;    // ← always show failed in History
     const isActive100 = (s.confidence ?? 0) >= 100 &&
       (Boolean(tradeLocks[s.instrument ?? s.symbol ?? ""]) || isRecent(s));
     return !isActive100;

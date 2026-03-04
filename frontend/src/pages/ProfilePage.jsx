@@ -103,55 +103,66 @@ export default function ProfilePage() {
   const [editing,   setEditing]   = useState(null);
   const [draftName, setDraftName] = useState("");
   // Risk slider — live synced to backend via POST /api/settings/update
-  const [draftRisk,    setDraftRisk]    = useState(10.0);  // default 10%
-  const [riskSyncing,  setRiskSyncing]  = useState(false);
-  const [riskSynced,   setRiskSynced]   = useState(false);
-  const [riskError,    setRiskError]    = useState(null);
+  // ── Dual independent risk sliders (Oanda + Bybit) ───────────────────────
+  const [oandaRisk,      setOandaRisk]      = useState(10.0);
+  const [bybitRisk,      setBybitRisk]      = useState(10.0);
+  const [botEnabled,     setBotEnabled]     = useState(true);
+  const [ttlMinutes,     setTtlMinutes]     = useState(120);
+  const [riskSyncing,    setRiskSyncing]    = useState(false);
+  const [riskSynced,     setRiskSynced]     = useState(false);
+  const [riskError,      setRiskError]      = useState(null);
+  // Keep legacy draftRisk for compat with existing components
+  const draftRisk    = isCrypto ? bybitRisk   : oandaRisk;
+  const setDraftRisk = isCrypto ? setBybitRisk : setOandaRisk;
   const [saving,    setSaving]    = useState(null);
   const [saveError, setSaveError] = useState(null);
 
-  // ── Load authoritative risk from GET /api/settings on every mount ───────
-  // This is the fix for the "1% vs 10%" bug: React state resets on navigation,
-  // so we always pull the real value from the server, not the component default.
+  // ── Load authoritative profile from GET /api/profile (Clerk-linked) ──────
   const [riskInitialised, setRiskInitialised] = useState(false);
 
   useEffect(() => {
-    api.get("/settings")
+    api.get("/profile")
       .then(({ data }) => {
-        if (data?.risk_pct != null) {
-          setDraftRisk(parseFloat(data.risk_pct));
-        }
+        if (data?.oanda_risk_pct != null) setOandaRisk(parseFloat(data.oanda_risk_pct));
+        if (data?.bybit_risk_pct != null) setBybitRisk(parseFloat(data.bybit_risk_pct));
+        if (data?.bot_enabled    != null) setBotEnabled(Boolean(data.bot_enabled));
+        if (data?.ttl_minutes    != null) setTtlMinutes(parseInt(data.ttl_minutes));
       })
       .catch(() => {
-        // Fallback: try /health if /settings isn't available yet
-        api.get("/health").then(({ data }) => {
-          if (data?.effective_risk_pct != null) {
-            setDraftRisk(parseFloat(data.effective_risk_pct));
+        // Fallback: legacy /settings endpoint
+        api.get("/settings").then(({ data }) => {
+          if (data?.risk_pct != null) {
+            setOandaRisk(parseFloat(data.risk_pct));
+            setBybitRisk(parseFloat(data.risk_pct));
           }
         }).catch(() => {});
       })
       .finally(() => setRiskInitialised(true));
-  }, []);
+  }, []);  // once on mount — profile is Clerk-scoped server-side
 
-  // ── Debounced risk sync — only fires AFTER initial load to prevent
-  // overwriting server value with the component default (10.0) on mount ───
+  // ── Debounced profile sync — fires 800ms after any risk/bot change ───────
   useEffect(() => {
-    if (!riskInitialised) return;   // ← key guard: don't fire before server value arrives
+    if (!riskInitialised) return;
     const t = setTimeout(async () => {
       setRiskSyncing(true);
       setRiskError(null);
       try {
-        await api.post("/settings/update", { risk_pct: parseFloat(draftRisk) });
+        await api.post("/profile/update", {
+          oanda_risk_pct: parseFloat(oandaRisk),
+          bybit_risk_pct: parseFloat(bybitRisk),
+          bot_enabled:    botEnabled,
+          ttl_minutes:    ttlMinutes,
+        });
         setRiskSynced(true);
         setTimeout(() => setRiskSynced(false), 2000);
-      } catch (e) {
-        setRiskError("Sync failed");
+      } catch {
+        setRiskError("Sync failed — check connection");
       } finally {
         setRiskSyncing(false);
       }
     }, 800);
     return () => clearTimeout(t);
-  }, [draftRisk, riskInitialised]);
+  }, [oandaRisk, bybitRisk, botEnabled, ttlMinutes, riskInitialised]);
 
   const openEdit = useCallback((field) => {
     setSaveError(null);
@@ -303,57 +314,88 @@ export default function ProfilePage() {
         {/* ── Bot Status (replaces credential forms in Private Bot Mode) ──── */}
         <BotStatusSection isCrypto={isCrypto} accent={accent} accentDim={accentDim} accentBdr={accentBdr} />
 
-        {/* ── Risk Settings ────────────────────────────────────────────────── */}
-        <Section label="Risk Settings">
-          <div style={{ padding: "4px 0" }}>
+        {/* ── Section 3: Risk — dual independent sliders ───────────────────── */}
+        <Section label="Risk">
+          {/* Sync status row */}
+          <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 6, minHeight: 16 }}>
+            {riskSyncing && <span style={{ fontSize: "0.6rem", color: C.sub }}>syncing…</span>}
+            {riskSynced && !riskSyncing && <span style={{ fontSize: "0.6rem", color: "#00FF41" }}>✓ saved</span>}
+            {riskError  && <span style={{ fontSize: "0.6rem", color: C.red }}>{riskError}</span>}
+          </div>
+
+          {/* Oanda risk slider */}
+          <div style={{ padding: "4px 0 14px" }}>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
               <div>
-                <p style={{ color: C.white, fontSize: "0.85rem", fontWeight: 600, margin: 0 }}>
-                  Risk Per Trade
+                <p style={{ color: C.white, fontSize: "0.82rem", fontWeight: 600, margin: 0 }}>
+                  Oanda Risk Per Trade
                 </p>
-                <p style={{ color: C.sub, fontSize: "0.7rem", margin: "3px 0 0" }}>
-                  % of account equity per auto-executed signal
+                <p style={{ color: C.sub, fontSize: "0.68rem", margin: "2px 0 0" }}>
+                  Forex · Metals · Indices auto-execution
                 </p>
               </div>
-              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                <span style={{
-                  fontFamily: FONT_MONO, fontSize: "1.1rem", fontWeight: 700,
-                  color: accent,
-                  textShadow: `0 0 10px ${accent}80`,
-                }}>
-                  {parseFloat(draftRisk).toFixed(1)}%
-                </span>
-                {riskSyncing && (
-                  <span style={{ fontSize: "0.6rem", color: C.sub }}>syncing…</span>
-                )}
-                {riskSynced && !riskSyncing && (
-                  <span style={{ fontSize: "0.6rem", color: C.green }}>✓ saved</span>
-                )}
-                {riskError && (
-                  <span style={{ fontSize: "0.6rem", color: C.red }}>{riskError}</span>
-                )}
-              </div>
+              <span style={{ fontFamily: FONT_MONO, fontSize: "1.05rem", fontWeight: 700, color: "#00C2FF",
+                             textShadow: "0 0 10px #00C2FF80" }}>
+                {parseFloat(oandaRisk).toFixed(1)}%
+              </span>
             </div>
-            <RiskSlider value={draftRisk} onChange={setDraftRisk} accent={accent} />
-            <p style={{ color: C.sub, fontSize: "0.65rem", marginTop: 8 }}>
-              Each trade risks {parseFloat(draftRisk).toFixed(1)}% of account equity.
-              Changes sync to the bot immediately — no restart required.
+            <RiskSlider value={oandaRisk} onChange={setOandaRisk} accent="#00C2FF" />
+          </div>
+
+          {/* Bybit risk slider */}
+          <div style={{ padding: "4px 0 14px", borderTop: `1px solid ${C.cardBdr}` }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10, marginTop: 14 }}>
+              <div>
+                <p style={{ color: C.white, fontSize: "0.82rem", fontWeight: 600, margin: 0 }}>
+                  Bybit Risk Per Trade
+                </p>
+                <p style={{ color: C.sub, fontSize: "0.68rem", margin: "2px 0 0" }}>
+                  Perpetuals · 20× Isolated auto-execution
+                </p>
+              </div>
+              <span style={{ fontFamily: FONT_MONO, fontSize: "1.05rem", fontWeight: 700, color: "#FFA500",
+                             textShadow: "0 0 10px #FFA50080" }}>
+                {parseFloat(bybitRisk).toFixed(1)}%
+              </span>
+            </div>
+            <RiskSlider value={bybitRisk} onChange={setBybitRisk} accent="#FFA500" />
+          </div>
+
+          {/* Bot TTL */}
+          <div style={{ padding: "4px 0", borderTop: `1px solid ${C.cardBdr}` }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 14, marginBottom: 8 }}>
+              <div>
+                <p style={{ color: C.white, fontSize: "0.82rem", fontWeight: 600, margin: 0 }}>Signal TTL</p>
+                <p style={{ color: C.sub, fontSize: "0.68rem", margin: "2px 0 0" }}>Force-close if not hit in N minutes</p>
+              </div>
+              <span style={{ fontFamily: FONT_MONO, fontSize: "1.05rem", fontWeight: 700, color: accent }}>
+                {ttlMinutes}m
+              </span>
+            </div>
+            <input type="range" min={15} max={480} step={15} value={ttlMinutes}
+              onChange={e => setTtlMinutes(parseInt(e.target.value))}
+              style={{ width: "100%", accentColor: accent, cursor: "pointer" }} />
+            <p style={{ color: C.sub, fontSize: "0.63rem", marginTop: 6 }}>
+              Range: 15 min – 8 hours. Default 120 min (2 h).
             </p>
           </div>
         </Section>
 
-                {/* ── Section 4: Security ──────────────────────────────────────────── */}
+        {/* ── Section 4: Security ──────────────────────────────────────────── */}
         <Section label="Security">
-          <StaticRow icon="🔒" label="Authentication" value="Clerk" sub="Managed identity · industry standard" />
+          <StaticRow icon="🔒" label="Authentication" value="Clerk" sub="RS256 JWT · industry standard" />
           <StaticRow icon="📱" label="Session"        value="Active" sub="Managed by Clerk SSO" />
+          <StaticRow icon="🔑" label="Credentials"    value=".env only" sub="API keys never stored in database" />
+          <StaticRow icon="👤" label="Profile scope"  value="Per-user" sub="Vault keyed by Clerk user ID" />
         </Section>
 
         {/* ── Section 5: About ─────────────────────────────────────────────── */}
         <Section label="About">
-          <StaticRow icon="🧠" label="SMC Engine"     value="v1.0.0"  sub="3-layer confluence analysis" />
-          <StaticRow icon="📈" label="Instruments"    value={isCrypto ? "15 Perpetuals" : "15"} sub={isCrypto ? "Bybit Linear · Top volume" : "Forex · Metals · Indices · Crypto"} />
-          <StaticRow icon="⏱"  label="Signal TTL"     value="2 hours" sub="Auto-expires if TP/SL not hit" />
-          <StaticRow icon="🔄" label="Candle Refresh" value="60 s"    sub="H1 · M15 · M5 · M1 per instrument" />
+          <StaticRow icon="🧠" label="SMC Engine"        value="v4.0.0"  sub="3-layer confluence · both engines" />
+          <StaticRow icon="📈" label="Oanda Instruments" value="16"       sub="10 Forex · 3 Metals · 3 Indices" />
+          <StaticRow icon="₿"  label="Bybit Symbols"     value="19"       sub="14 Blue-chips · 5 Meme coins" />
+          <StaticRow icon="⏱"  label="Signal TTL"        value={`${ttlMinutes}m`} sub="Auto-expires if TP/SL not hit" />
+          <StaticRow icon="🔄" label="Candle Refresh"    value="60 s"     sub="H1 · M15 · M5 · M1 per instrument" />
         </Section>
 
         {/* ── Sign Out ─────────────────────────────────────────────────────── */}
