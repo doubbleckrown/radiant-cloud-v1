@@ -1260,16 +1260,25 @@ async def bybit_refresh_loop() -> None:
                                             sym, signal.direction.value,
                                             signal.confidence, signal.risk_reward)
 
-                                # ── Push notification (≥95% confluence) ────────
+                                # ── Push notification ─────────────────────────────
+                                # 100% confluence → 'signal' type (signal.wav, signals_channel)
+                                # 95-99% → also 'signal' but labelled as "Setup" not "Signal"
                                 if signal.confidence >= 95:
                                     label      = sym.replace("USDT", "/USDT")
-                                    push_title = f"🚨 Crypto Setup: {label} {signal.direction.value.title()}"
+                                    side_label = signal.direction.value.title()
+                                    is_full    = signal.confidence >= 100
+                                    push_title = (
+                                        f"🚨 New 100% Signal: {label} {side_label}!"
+                                        if is_full else
+                                        f"⚡ {signal.confidence}% Setup: {label} {side_label}"
+                                    )
                                     push_body  = (
                                         f"Entry {signal.entry_price:.4f}  ·  "
-                                        f"{signal.confidence}% confluence  ·  "
-                                        f"R:R 1:{signal.risk_reward}"
+                                        f"SL {signal.stop_loss:.4f}  ·  "
+                                        f"TP {signal.take_profit:.4f}  ·  R:R 1:{signal.risk_reward}"
                                     )
-                                    asyncio.create_task(_send_onesignal_push(
+                                    asyncio.create_task(_push_notification(
+                                        notification_type = "signal",
                                         title = push_title,
                                         body  = push_body,
                                         data  = {
@@ -1312,46 +1321,82 @@ async def broadcast(message: dict) -> None:
     _ws_clients.difference_update(dead)
 
 
-async def _send_onesignal_push(title: str, body: str, data: dict) -> None:
+# ─────────────────────────────────────────────────────────────────────────────
+#  OneSignal — typed multi-sound push notification helper
+#
+#  Each trade event maps to its own:
+#    • iOS sound file  (.wav in the Xcode bundle)
+#    • Android channel (created in the app with matching ID)
+#    • Notification group (for collapsing in the shade)
+#
+#  OneSignal External User ID / android_channel_id docs:
+#    https://documentation.onesignal.com/reference/create-notification
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Notification type → (ios_sound, android_channel_id, android_sound, group_key)
+_PUSH_PROFILES: dict[str, tuple[str, str, str, str]] = {
+    #  type          ios_sound          android_channel_id                    android_sound   group
+    "signal":   ("signal.wav",     "26b3d408-b543-4708-8860-8326a6db4584", "signal",       "fx-signals"),
+    "tp":       ("take_profit.wav","969e380e-5a81-41ea-8edc-09e35779a2b5", "take_profit",  "fx-exits"),
+    "sl":       ("stop_loss.wav",  "0930daae-8c84-493e-ba48-c23cf5381507", "stop_loss",    "fx-exits"),
+    "ttl":      ("ttl_close.wav",  "7ce477fa-c859-46e1-9520-451d8d8812df", "ttl_close",    "fx-exits"),
+}
+# Fallback for any unrecognised type
+_PUSH_PROFILE_DEFAULT = ("signal.wav", "26b3d408-b543-4708-8860-8326a6db4584", "signal", "fx-signals")
+
+
+async def _push_notification(
+    notification_type: str,
+    title:             str,
+    body:              str,
+    data:              dict,
+) -> None:
     """
-    Send a push notification via OneSignal REST API.
+    Send a typed push notification via OneSignal REST API.
 
-    Triggered exclusively from the BACKEND (signal loops) so notifications
-    fire even when the phone screen is off / app is backgrounded.
+    notification_type must be one of: 'signal' | 'tp' | 'sl' | 'ttl'
+    Each type carries its own sound file and Android channel ID so the user
+    can set per-channel volume, vibration, and LED colour in device settings.
 
-    Sound:   ios_sound='ding.wav', android_sound='ding' — place ding.wav in
-             the iOS app bundle and ding.mp3 in res/raw for Android.
-             Falls back to device default if the file is absent.
-    Stacking: android_group + thread_id let multiple signals stack under one
-             expandable notification rather than flooding the shade.
+    Sound files required:
+      iOS  : signal.wav, take_profit.wav, stop_loss.wav, ttl_close.wav  (in Xcode bundle)
+      Android: same names as .mp3 in res/raw/  (channel IDs pre-created in app)
+
+    Called exclusively from the backend — fires even when the app is closed.
     """
     if not ONESIGNAL_APP_ID or not ONESIGNAL_REST_KEY:
         return
     if not _push_subscriptions:
         return
+
+    ios_sound, channel_id, android_sound, group_key = _PUSH_PROFILES.get(
+        notification_type, _PUSH_PROFILE_DEFAULT
+    )
     instrument_key = data.get("instrument", data.get("symbol", "fx-radiant"))
+
     payload = {
         "app_id":                   ONESIGNAL_APP_ID,
         "include_subscription_ids": list(_push_subscriptions),
         "headings":                 {"en": title},
         "contents":                 {"en": body},
-        "data":                     data,
-        # ── Sound ──────────────────────────────────────────────────────────
-        "ios_sound":                "ding.wav",
-        "android_sound":            "ding",
+        "data":                     {**data, "notification_type": notification_type},
+        # ── Per-type sound ──────────────────────────────────────────────────
+        "ios_sound":                ios_sound,
+        "android_sound":            android_sound,
+        # ── Android channel (controls sound, vibration, LED per event type) ─
+        "android_channel_id":       channel_id,
         # ── Vibration ──────────────────────────────────────────────────────
         "android_vibrate":          True,
-        # ── Stacking (group signals under one expandable notification) ─────
-        "android_group":            "fx-radiant-signals",
-        "android_group_message":    {"en": "$[notif_count] new FX Radiant signals"},
-        "thread_id":                "fx-radiant-signals",   # iOS 12+ grouping
-        "summary_arg":              "FX Radiant Signals",
-        # ── Collapse identical instruments (replace, don't stack per-pair) ─
-        "collapse_id":              instrument_key,
-        # ── Background delivery ────────────────────────────────────────────
-        # content_available=1 wakes iOS apps in background for silent pushes
+        # ── Grouping (stack same-type alerts together in the shade) ─────────
+        "android_group":            group_key,
+        "android_group_message":    {"en": "$[notif_count] FX Radiant alerts"},
+        "thread_id":                group_key,          # iOS 12+ thread grouping
+        "summary_arg":              "FX Radiant",
+        # ── Collapse per-instrument (replaces previous alert for same pair) ─
+        "collapse_id":              f"{notification_type}:{instrument_key}",
+        # ── Background wakeup ───────────────────────────────────────────────
         "content_available":        True,
-        "priority":                 10,   # high delivery priority
+        "priority":                 10,
     }
     try:
         async with httpx.AsyncClient(timeout=10) as client:
@@ -1364,11 +1409,23 @@ async def _send_onesignal_push(title: str, body: str, data: dict) -> None:
                 json=payload,
             )
         if resp.status_code not in (200, 201):
-            logger.warning("OneSignal push failed: %s — %s", resp.status_code, resp.text[:200])
+            logger.warning(
+                "OneSignal [%s] push failed: %s — %s",
+                notification_type, resp.status_code, resp.text[:200],
+            )
         else:
-            logger.info("📲 Push sent to %d sub(s): %s", len(_push_subscriptions), body[:60])
+            logger.info(
+                "📲 [%s] Push → %d sub(s)  sound=%s  %s",
+                notification_type, len(_push_subscriptions), ios_sound, body[:60],
+            )
     except Exception as exc:
-        logger.warning("OneSignal push error: %s", exc)
+        logger.warning("OneSignal push error [%s]: %s", notification_type, exc)
+
+
+# Backwards-compat shim — keeps any external callers working while we migrate
+async def _send_onesignal_push(title: str, body: str, data: dict) -> None:
+    """Deprecated shim: routes to _push_notification with type='signal'."""
+    await _push_notification("signal", title, body, data)
 
 
 async def _oanda_auto_execute(ins: str, sig_dict: dict, signal) -> None:
@@ -1516,18 +1573,27 @@ async def candle_refresh_loop() -> None:
                                 await broadcast(sig_dict)
                                 logger.info("🟢 OANDA SIGNAL: %s %s  conf=%d%%", ins, signal.direction.value, signal.confidence)
                                 if signal.confidence >= 95:
-                                    asyncio.create_task(_send_onesignal_push(
-                                        title = f"🚨 {ins.replace('_','/')} {signal.direction.value.title()} Setup",
+                                    ins_label  = ins.replace("_", "/")
+                                    side_label = signal.direction.value.title()
+                                    is_full    = signal.confidence >= 100
+                                    asyncio.create_task(_push_notification(
+                                        notification_type = "signal",
+                                        title = (
+                                            f"🚨 New 100% Signal: {ins_label} {side_label}!"
+                                            if is_full else
+                                            f"⚡ {signal.confidence}% Setup: {ins_label} {side_label}"
+                                        ),
                                         body  = (
                                             f"Entry {signal.entry_price:.5f}  ·  "
-                                            f"{signal.confidence}% confluence  ·  "
-                                            f"R:R 1:{signal.risk_reward}"
+                                            f"SL {signal.stop_loss:.5f}  ·  "
+                                            f"TP {signal.take_profit:.5f}  ·  R:R 1:{signal.risk_reward}"
                                         ),
                                         data  = {
                                             "instrument": ins,
                                             "direction":  signal.direction.value,
                                             "entry":      round(signal.entry_price, 5),
                                             "confidence": signal.confidence,
+                                            "engine":     "OANDA",
                                         },
                                     ))
                                 # ── Hard auto-execute at 100% confluence ───────────
@@ -1715,7 +1781,8 @@ async def exit_monitor_loop() -> None:
                 # ── 1. Hard 2-hour TTL ──────────────────────────────────────
                 age_s = now - opened_at
                 if age_s >= TRADE_LOCK_TTL_SECONDS:
-                    reason = f"TTL (2h expired; opened {int(age_s)}s ago)"
+                    reason     = f"TTL (2h expired; opened {int(age_s)}s ago)"
+                    sym_label  = symbol.replace("_", "/").replace("USDT", "/USDT")
                     logger.warning(
                         "[EXIT] %s — TTL triggered  age=%ds  price=%.5f",
                         symbol, int(age_s), price,
@@ -1724,14 +1791,28 @@ async def exit_monitor_loop() -> None:
                         await _exit_close_bybit(symbol, lock, reason)
                     else:
                         await _exit_close_oanda(symbol, lock, reason)
+                    # ── TTL notification ─────────────────────────────────────
+                    asyncio.create_task(_push_notification(
+                        notification_type = "ttl",
+                        title = "⏱ 2h Timer Expired",
+                        body  = f"⏱ 2h Timer Expired. {sym_label} closed at Market Price.",
+                        data  = {
+                            "instrument": symbol,
+                            "price":      round(price, 5),
+                            "age_s":      int(age_s),
+                            "direction":  direction,
+                        },
+                    ))
                     continue   # skip TP/SL checks after TTL close
 
                 # ── 2. Take-Profit check ────────────────────────────────────
                 if tp > 0:
                     tp_hit = (direction == "LONG"  and price >= tp) or                              (direction == "SHORT" and price <= tp)
                     if tp_hit:
-                        cmp    = ">=" if direction == "LONG" else "<="
-                        reason = f"TP hit (price {price:.5f} {cmp} tp {tp:.5f})"
+                        cmp       = ">=" if direction == "LONG" else "<="
+                        reason    = f"TP hit (price {price:.5f} {cmp} tp {tp:.5f})"
+                        sym_label = symbol.replace("_", "/").replace("USDT", "/USDT")
+                        dp        = 4 if is_bybit else 5
                         logger.info(
                             "[EXIT] %s — TP triggered  price=%.5f  tp=%.5f  dir=%s",
                             symbol, price, tp, direction,
@@ -1740,14 +1821,28 @@ async def exit_monitor_loop() -> None:
                             await _exit_close_bybit(symbol, lock, reason)
                         else:
                             await _exit_close_oanda(symbol, lock, reason)
+                        # ── TP notification ───────────────────────────────────
+                        asyncio.create_task(_push_notification(
+                            notification_type = "tp",
+                            title = f"💰 Take Profit Hit! {sym_label}",
+                            body  = f"💰 Take Profit Hit! {sym_label} closed at {price:.{dp}f}.",
+                            data  = {
+                                "instrument": symbol,
+                                "price":      round(price, dp),
+                                "tp":         round(tp,    dp),
+                                "direction":  direction,
+                            },
+                        ))
                         continue
 
                 # ── 3. Stop-Loss check ──────────────────────────────────────
                 if sl > 0:
                     sl_hit = (direction == "LONG"  and price <= sl) or                              (direction == "SHORT" and price >= sl)
                     if sl_hit:
-                        cmp    = "<=" if direction == "LONG" else ">="
-                        reason = f"SL hit (price {price:.5f} {cmp} sl {sl:.5f})"
+                        cmp       = "<=" if direction == "LONG" else ">="
+                        reason    = f"SL hit (price {price:.5f} {cmp} sl {sl:.5f})"
+                        sym_label = symbol.replace("_", "/").replace("USDT", "/USDT")
+                        dp        = 4 if is_bybit else 5
                         logger.info(
                             "[EXIT] %s — SL triggered  price=%.5f  sl=%.5f  dir=%s",
                             symbol, price, sl, direction,
@@ -1756,6 +1851,18 @@ async def exit_monitor_loop() -> None:
                             await _exit_close_bybit(symbol, lock, reason)
                         else:
                             await _exit_close_oanda(symbol, lock, reason)
+                        # ── SL notification ───────────────────────────────────
+                        asyncio.create_task(_push_notification(
+                            notification_type = "sl",
+                            title = f"📉 Stop Loss Hit. {sym_label}",
+                            body  = f"📉 Stop Loss Hit. {sym_label} closed at {price:.{dp}f}.",
+                            data  = {
+                                "instrument": symbol,
+                                "price":      round(price, dp),
+                                "sl":         round(sl,    dp),
+                                "direction":  direction,
+                            },
+                        ))
 
         except Exception as loop_exc:
             logger.error("exit_monitor_loop error: %s", loop_exc)
