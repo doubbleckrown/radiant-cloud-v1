@@ -30,6 +30,7 @@ from app.core.config import (
 )
 from app.core.trade_tracker import trade_tracker
 from app.services.strategy import TradeSignal
+import app.core.state as state
 
 logger = logging.getLogger("fx-signal")
 

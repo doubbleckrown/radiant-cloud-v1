@@ -202,17 +202,47 @@ async def auto_execute(ins: str, sig_dict: dict, signal: TradeSignal) -> None:
         risk_usd = nav * risk_pct
 
         is_long  = signal.direction.value == "LONG"
-        sl_dist  = abs(signal.entry_price - signal.stop_loss)
+        entry    = signal.entry_price
+        sl       = signal.stop_loss
+        tp       = signal.take_profit
+
+        # ── Pre-trade SL/TP geometry check ───────────────────────────────────
+        # Oanda silently accepts an order where SL/TP are on the wrong side of
+        # the entry price, but returns no orderFillTransaction (the order either
+        # triggers immediately or is queued incorrectly).  Catch this before
+        # touching the API — the strategy engine occasionally produces an
+        # inverted signal during fast moves where the price has already passed
+        # the intended entry level.
+        #
+        # LONG:  SL must be below entry, TP must be above entry
+        # SHORT: SL must be above entry, TP must be below entry
+        if is_long:
+            geo_valid = sl < entry < tp
+            geo_reason = f"LONG needs SL {sl:.5f} < entry {entry:.5f} < TP {tp:.5f}"
+        else:
+            geo_valid = sl > entry > tp
+            geo_reason = f"SHORT needs SL {sl:.5f} > entry {entry:.5f} > TP {tp:.5f}"
+
+        if not geo_valid:
+            logger.warning(
+                "Oanda AutoExec SKIPPED %s — SL/TP geometry invalid: %s",
+                ins, geo_reason,
+            )
+            sig_dict["exec_status"] = "skipped"
+            sig_dict["exec_error"]  = f"Skipped: SL/TP invalid vs entry ({geo_reason})"
+            return
+
+        sl_dist  = abs(entry - sl)
         units    = _compute_units(ins, risk_usd, sl_dist, is_long)
         if units == 0:
             sig_dict["exec_status"] = "failed"
             sig_dict["exec_error"]  = "Computed 0 units — SL distance too small"
             return
 
-        trade_tracker.lock(ins, signal.direction.value, signal.entry_price,
-                           "pending", sl=signal.stop_loss, tp=signal.take_profit)
+        trade_tracker.lock(ins, signal.direction.value, entry,
+                           "pending", sl=sl, tp=tp)
         result   = await place_market_order(api_key, account_id, ins, units,
-                                            signal.stop_loss, signal.take_profit)
+                                            sl, tp)
 
         # ── Extract the real trade ID from the fill transaction ───────────────
         # Oanda V20 order-fill response keys, in priority order:
@@ -238,8 +268,8 @@ async def auto_execute(ins: str, sig_dict: dict, signal: TradeSignal) -> None:
             sig_dict["exec_error"]  = "Order accepted but no fill transaction returned"
             return
 
-        trade_tracker.lock(ins, signal.direction.value, signal.entry_price,
-                           trade_id, sl=signal.stop_loss, tp=signal.take_profit)
+        trade_tracker.lock(ins, signal.direction.value, entry,
+                           trade_id, sl=sl, tp=tp)
 
         sig_dict["exec_status"]   = "ok"
         sig_dict["exec_trade_id"] = trade_id
