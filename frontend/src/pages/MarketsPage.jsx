@@ -98,10 +98,11 @@ export default function MarketsPage() {
   const appMode = useAuthStore(s => s.appMode);
 
   // ── Oanda state (FOREX mode) ──────────────────────────────────────────────
-  const [prices,        setPrices]        = useState({});
-  const [flickerState,  setFlickerState]  = useState({});
-  const [analysis,      setAnalysis]      = useState({});
-  const [oandaCategory, setOandaCategory] = useState("All");
+  const [prices,         setPrices]        = useState({});
+  const [flickerState,   setFlickerState]  = useState({});
+  const [analysis,       setAnalysis]      = useState({});
+  const [oandaChange24,  setOandaChange24] = useState({});   // instrument → 24h % change
+  const [oandaCategory,  setOandaCategory] = useState("All");
 
   // ── Bybit state (CRYPTO mode) ─────────────────────────────────────────────
   const [bybitPrices,   setBybitPrices]   = useState({});
@@ -144,11 +145,17 @@ export default function MarketsPage() {
     if (isCrypto) return;
     try {
       const { data } = await api.get("/markets", { headers: { "X-App-Mode": "FOREX" } });
-      const map = {};
+      const map      = {};
+      const changeMap = {};
       for (const item of (data ?? [])) {
-        map[item.instrument] = item;
+        map[item.instrument]      = item;
+        // Oanda 24h change now returned by /api/markets — store alongside Bybit meta
+        if (item.change24h != null) {
+          changeMap[item.instrument] = item.change24h;
+        }
       }
       setAnalysis(map);
+      setOandaChange24(changeMap);
     } catch { /* non-critical */ }
   }, [isCrypto]);
 
@@ -199,8 +206,12 @@ export default function MarketsPage() {
     setSelectedInstrument(null);
     setOandaCategory("All");
     setBybitCategory("All");
-    prevPricesRef.current = {};
-  }, [isCrypto]);
+    // Seed prevPricesRef from the already-loaded price map so the first tick
+    // after a mode switch doesn't generate spurious flicker on every instrument.
+    // Without this, every price is treated as "new vs undefined" → all flash on load.
+    const existingPrices = isCrypto ? bybitPrices : prices;
+    prevPricesRef.current = { ...existingPrices };
+  }, [isCrypto]);   // intentionally omit bybitPrices/prices from deps — this is a one-shot seed
 
   // ── Active meta / categories / prices depending on mode ──────────────────
   const activeMeta       = isCrypto ? BYBIT_META       : OANDA_META;
@@ -276,7 +287,10 @@ export default function MarketsPage() {
           const state    = activeAnalysis[instrument];
           const conf     = state?.confidence ?? 0;
           const bias     = state?.bias ?? "NEUTRAL";
-          const change24 = isCrypto ? (bybitMeta[instrument]?.change24h ?? null) : null;
+          // 24h % change — Bybit from ticker meta, Oanda computed server-side from H1 open
+          const change24 = isCrypto
+            ? (bybitMeta[instrument]?.change24h ?? null)
+            : (oandaChange24[instrument] ?? null);
           const isSelected = selectedInstrument === instrument;
 
           // ── 100% Panic Glow — spec colours from design brief ────────────
@@ -288,11 +302,30 @@ export default function MarketsPage() {
             : isBear100
             ? "drop-shadow(0 0 15px #F87171) drop-shadow(0 0 6px #F8717160)"
             : "none";
+          // ── Price change border flash (feature parity: Oanda SSE + Bybit poll) ──
+          // flicker "up"   → 600ms neon green border + soft glow
+          // flicker "down" → 600ms neon red border + soft glow
+          // panic 100%     → sustained pulse overrides flicker
+          const flickerBorder = flicker === "up"
+            ? "1px solid rgba(0,255,65,0.55)"
+            : flicker === "down"
+            ? "1px solid rgba(255,0,0,0.55)"
+            : null;
+          const flickerShadow = flicker === "up"
+            ? "0 0 12px rgba(0,255,65,0.22)"
+            : flicker === "down"
+            ? "0 0 12px rgba(255,0,0,0.22)"
+            : null;
+
           const panicBorder = isBull100
             ? "1px solid rgba(74,222,128,0.55)"
             : isBear100
             ? "1px solid rgba(248,113,113,0.55)"
-            : isSelected ? `1px solid ${accentBdr}` : "1px solid transparent";
+            : null;
+
+          const activeBorder = panicBorder
+            ?? flickerBorder
+            ?? (isSelected ? `1px solid ${accentBdr}` : "1px solid transparent");
 
           return (
             <motion.div
@@ -300,25 +333,34 @@ export default function MarketsPage() {
               layout
               onClick={() => setSelectedInstrument(isSelected ? null : instrument)}
               animate={{
-                filter:     panicGlow,
-                // Slow pulse only on panic-level confidence
-                boxShadow:  isPanic
+                filter:    panicGlow,
+                // Panic: sustained slow pulse. Flicker: fast single flash.
+                boxShadow: isPanic
                   ? isBull100
                     ? ["0 0 0px transparent", "0 0 24px #4ADE8040", "0 0 0px transparent"]
                     : ["0 0 0px transparent", "0 0 24px #F8717140", "0 0 0px transparent"]
-                  : "0 0 0px transparent",
+                  : flickerShadow ?? "0 0 0px transparent",
+                // Border animates between flicker, panic, and neutral
+                borderColor: isPanic
+                  ? (isBull100 ? "rgba(74,222,128,0.55)" : "rgba(248,113,113,0.55)")
+                  : flicker === "up"
+                  ? "rgba(0,255,65,0.55)"
+                  : flicker === "down"
+                  ? "rgba(255,0,0,0.55)"
+                  : isSelected
+                  ? accentBdr
+                  : "transparent",
               }}
               transition={isPanic
                 ? { boxShadow: { duration: 1.8, repeat: Infinity, ease: "easeInOut" }, filter: { duration: 0.3 } }
-                : { duration: 0.3 }
+                : { duration: 0.15 }
               }
               style={{
                 borderRadius: 14,
                 background:   isSelected ? accentDim : "transparent",
-                border:       panicBorder,
+                border:       activeBorder,
                 cursor:       "pointer",
                 overflow:     "hidden",
-                transition:   "background 0.2s",
               }}
             >
               {/* ── Row ───────────────────────────────────────────────── */}

@@ -133,6 +133,7 @@ _candle_cache:   dict[str, dict[str, list[Candle]]] = {
     ins: {gran: [] for gran in GRANULARITIES} for ins in INSTRUMENTS
 }
 _latest_prices:  dict[str, float]       = {}
+_oanda_daily_open: dict[str, float]     = {}   # instrument → today's session open price
 _ws_clients:     set[WebSocket]         = set()
 _signal_history: dict[str, list[dict]]  = {ins: [] for ins in INSTRUMENTS}
 _engines:        dict[str, SMCConfluenceEngine] = {
@@ -488,9 +489,12 @@ async def place_market_order(
     instrument: str, units: int, stop_loss: float, take_profit: float,
 ) -> dict:
     sl_dec = _OANDA_SL_DECIMALS.get(instrument, 5)
+    # Oanda v20 spec: units must be an integer string — "1" not "1.0"
+    # XAU_USD min 1 oz; all other metals/indices also floor to int.
+    units_str = str(int(units))
     url  = f"{OANDA_BASE}/v3/accounts/{account_id}/orders"
     body = {"order": {
-        "type": "MARKET", "instrument": instrument, "units": str(units),
+        "type": "MARKET", "instrument": instrument, "units": units_str,
         "stopLossOnFill":   {"price": f"{stop_loss:.{sl_dec}f}"},
         "takeProfitOnFill": {"price": f"{take_profit:.{sl_dec}f}"},
         "timeInForce": "FOK",
@@ -805,12 +809,19 @@ async def bybit_fetch_account(api_key: str, api_secret: str) -> dict:
     """
     params, headers = _bybit_sign_get(api_key, api_secret, {"accountType": "UNIFIED"})
 
-    async with httpx.AsyncClient(timeout=20) as client:
-        resp = await client.get(
-            f"{BYBIT_BASE}/v5/account/wallet-balance",
-            headers=headers, params=params,
-        )
-        resp.raise_for_status()
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(15.0, connect=5.0)) as client:
+            resp = await client.get(
+                f"{BYBIT_BASE}/v5/account/wallet-balance",
+                headers=headers, params=params,
+            )
+            resp.raise_for_status()
+    except httpx.TimeoutException as exc:
+        raise RuntimeError(f"Bybit account fetch timed out: {exc}") from exc
+    except httpx.HTTPStatusError as exc:
+        raise RuntimeError(
+            f"Bybit HTTP {exc.response.status_code} on account fetch: {exc.response.text[:200]}"
+        ) from exc
 
     data = resp.json()
     _bybit_raise_on_error(data, "bybit_fetch_account")
@@ -843,27 +854,39 @@ async def bybit_fetch_positions(api_key: str, api_secret: str) -> list:
     """
     Fetch open Linear (USDT perpetual) positions for this account.
     Returns [] when no positions are open.
+
+    503-hardened:
+      • httpx.TimeoutException  — returns [] (not a crash) so the route stays alive
+      • httpx.HTTPStatusError   — re-raised as RuntimeError for clean JSON 503
+      • retCode != 0            — _bybit_raise_on_error formats the hint
     """
-    params, headers = _bybit_sign_get(api_key, api_secret, {
-        "category":   "linear",
-        "settleCoin": "USDT",
-        "limit":      "50",
-    })
+    try:
+        params, headers = _bybit_sign_get(api_key, api_secret, {
+            "category":   "linear",
+            "settleCoin": "USDT",
+            "limit":      "50",
+        })
 
-    async with httpx.AsyncClient(timeout=20) as client:
-        resp = await client.get(
-            f"{BYBIT_BASE}/v5/position/list",
-            headers=headers, params=params,
-        )
-        resp.raise_for_status()
+        async with httpx.AsyncClient(timeout=httpx.Timeout(15.0, connect=5.0)) as client:
+            resp = await client.get(
+                f"{BYBIT_BASE}/v5/position/list",
+                headers=headers, params=params,
+            )
+            resp.raise_for_status()
 
-    data = resp.json()
-    if data.get("retCode", -1) != 0:
-        raise RuntimeError(f"Bybit positions error {data.get('retCode')}: {data.get('retMsg')}")
+        data = resp.json()
+        _bybit_raise_on_error(data, "bybit_fetch_positions")
 
-    positions = data.get("result", {}).get("list", [])
-    # Only return positions with non-zero size
-    return [p for p in positions if float(p.get("size", 0) or 0) > 0]
+        positions = data.get("result", {}).get("list", [])
+        return [p for p in positions if float(p.get("size", 0) or 0) > 0]
+
+    except httpx.TimeoutException as exc:
+        logger.warning("bybit_fetch_positions timeout: %s — returning []", exc)
+        return []   # don't crash the route; exit monitor will reconcile
+    except httpx.HTTPStatusError as exc:
+        raise RuntimeError(
+            f"Bybit HTTP {exc.response.status_code} on position fetch: {exc.response.text[:200]}"
+        ) from exc
 
 
 async def bybit_fetch_trade_history(
@@ -1451,6 +1474,17 @@ async def candle_refresh_loop() -> None:
                     result = await _fetch_safe(ins, gran)
                     if result is not None:
                         _candle_cache[ins][gran] = result
+
+                # ── Oanda 24h session open: use first H1 candle from today ──────
+                # Gives the same baseline Bybit uses for its price24hPcnt field.
+                h1_snap = _candle_cache[ins].get("H1", [])
+                if h1_snap:
+                    # Find the candle whose open time is within the last 24 hours
+                    cutoff_ts = time.time() - 86400
+                    today_candles = [c for c in h1_snap if c.time >= cutoff_ts]
+                    if today_candles:
+                        _oanda_daily_open[ins] = today_candles[0].open
+
                 try:
                     h1    = _candle_cache[ins]["H1"]
                     price = _latest_prices.get(ins)
@@ -1997,12 +2031,21 @@ async def register_push(
 async def get_markets(_: dict = Depends(get_current_user)):
     result = []
     for ins in INSTRUMENTS:
-        price = _latest_prices.get(ins, 0.0)
-        h1    = _candle_cache[ins]["H1"]
-        state = _engines[ins].get_partial_state(h1, price) if len(h1) >= 210 else None
+        price      = _latest_prices.get(ins, 0.0)
+        daily_open = _oanda_daily_open.get(ins, 0.0)
+        h1         = _candle_cache[ins]["H1"]
+        state      = _engines[ins].get_partial_state(h1, price) if len(h1) >= 210 else None
+
+        # Oanda 24h % change — matches the same calculation Bybit uses
+        # ((current - session_open) / session_open) * 100
+        change24h: float | None = None
+        if price > 0 and daily_open > 0:
+            change24h = round((price - daily_open) / daily_open * 100, 2)
+
         result.append({
             "instrument": ins,
             "price":      price,
+            "change24h":  change24h,   # None until first H1 candle of today is cached
             "confidence": state.confidence        if state else 0,
             "bias":       state.layer1_bias.value if state else "NEUTRAL",
         })
