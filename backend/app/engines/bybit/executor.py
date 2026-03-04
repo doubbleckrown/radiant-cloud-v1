@@ -441,7 +441,8 @@ async def auto_execute(sym: str, sig_dict: dict, signal: TradeSignal) -> None:
 
         # ── 3. Account equity + risk-sized qty ───────────────────────────────
         acct_data = await fetch_account(api_key, secret)
-        equity    = float(acct_data.get("totalEquity", 0) or 0)
+        equity    = float(acct_data.get("totalEquity",           0) or 0)
+        available = float(acct_data.get("totalAvailableBalance", 0) or 0)
         if equity <= 0:
             sig_dict["exec_status"] = "failed"
             sig_dict["exec_error"]  = "Zero account equity"
@@ -449,7 +450,26 @@ async def auto_execute(sym: str, sig_dict: dict, signal: TradeSignal) -> None:
 
         clerk_id = sig_dict.get("clerk_id", "")
         risk_pct = get_risk_pct(clerk_id, "bybit") if clerk_id else 0.10
-        risk_usd = max(equity * risk_pct, 1.20)   # floor $1.20 initial margin
+
+        # Use totalAvailableBalance (free margin) as the sizing base, NOT
+        # totalEquity.  Equity includes unrealised PnL from open positions —
+        # using it overstates what Bybit will actually let us allocate and
+        # causes retCode 110007 "ab not enough for new order".
+        #
+        # Additionally cap the initial margin at 90% of available balance so
+        # there is always headroom for fees and the minimum margin reserve.
+        # Formula: initial_margin = qty * mark_price / lev = risk_usd (by design)
+        # So simply: risk_usd ≤ 0.90 × available
+        sizing_base = available if available > 0 else equity
+        risk_usd    = min(
+            max(sizing_base * risk_pct, 1.20),  # at least $1.20 initial margin
+            sizing_base * 0.90,                  # never exceed 90% of free balance
+        )
+
+        if risk_usd <= 0:
+            sig_dict["exec_status"] = "failed"
+            sig_dict["exec_error"]  = f"Insufficient available balance: {available:.2f} USDT"
+            return
 
         lev     = _safe_leverage(mark_price, sl, BYBIT_DEFAULT_LEVERAGE)
         qty_raw = (risk_usd * lev) / (sl_dist * mark_price)

@@ -246,11 +246,24 @@ async def auto_execute(ins: str, sig_dict: dict, signal: TradeSignal) -> None:
                                             sl, tp)
 
         # ── Extract the real trade ID from the fill transaction ───────────────
-        # Oanda V20 order-fill response keys, in priority order:
-        #   orderFillTransaction.tradeOpened.tradeID  — new trade opened
-        #   orderFillTransaction.id                   — fill transaction ID
-        #   orderCreateTransaction.id                 — order created (not filled yet)
-        # We must use tradeID (not transaction ID) for close_trade() calls.
+        # Oanda V20 market order response shapes:
+        #
+        #  Immediate fill (normal):
+        #    orderFillTransaction.tradeOpened.tradeID  ← what we need for close
+        #
+        #  Queued / not yet filled (happens on SPX500, indices during low liq):
+        #    orderCreateTransaction present, orderFillTransaction absent
+        #    The order is live but hasn't matched yet.
+        #    → Poll open orders briefly, or accept the order ID and let the
+        #      watcher reconcile once it fills.
+        #
+        #  Rejected (detected earlier by place_market_order, never reaches here)
+        #    orderRejectTransaction present → RuntimeError already raised
+        #
+        # Log the full keys so future ambiguous cases are diagnosable.
+        result_keys = list(result.keys()) if isinstance(result, dict) else []
+        logger.debug("Oanda %s fill response keys: %s", ins, result_keys)
+
         fill_tx  = result.get("orderFillTransaction") or {}
         trade_id = (
             (fill_tx.get("tradeOpened") or {}).get("tradeID")
@@ -260,14 +273,40 @@ async def auto_execute(ins: str, sig_dict: dict, signal: TradeSignal) -> None:
         )
 
         if not trade_id:
-            # Order was accepted (no reject tx) but no fill transaction present.
-            # This can happen for orders queued but not yet filled.
-            # Unlock immediately — the reconciliation loop will pick it up.
-            logger.warning("Oanda AutoExec %s: no tradeID in fill response — releasing lock", ins)
-            trade_tracker.unlock(ins)
-            sig_dict["exec_status"] = "failed"
-            sig_dict["exec_error"]  = "Order accepted but no fill transaction returned"
-            return
+            # orderFillTransaction absent — order was accepted but not yet filled.
+            # Grab the order ID from orderCreateTransaction so we can poll.
+            create_tx = result.get("orderCreateTransaction") or {}
+            order_id  = create_tx.get("id", "")
+
+            if order_id:
+                # Give Oanda up to 3 seconds to fill (indices can be slow).
+                import asyncio as _aio
+                for attempt in range(3):
+                    await _aio.sleep(1.0)
+                    try:
+                        open_trades = await fetch_open_trades(api_key, account_id)
+                        match = next((t for t in open_trades if t.get("instrument") == ins), None)
+                        if match:
+                            trade_id = str(match.get("id", ""))
+                            logger.info(
+                                "Oanda AutoExec %s: fill confirmed on poll attempt %d — tradeID=%s",
+                                ins, attempt + 1, trade_id,
+                            )
+                            break
+                    except Exception as poll_exc:
+                        logger.warning("Oanda fill poll %s attempt %d: %s", ins, attempt + 1, poll_exc)
+
+            if not trade_id:
+                logger.warning(
+                    "Oanda AutoExec %s: no tradeID after polling — response keys=%s orderID=%s",
+                    ins, result_keys, order_id,
+                )
+                trade_tracker.unlock(ins)
+                sig_dict["exec_status"] = "failed"
+                sig_dict["exec_error"]  = (
+                    f"Order {'queued (ID=' + order_id + ') but did not fill within 3s' if order_id else 'accepted with no fill transaction'}"
+                )
+                return
 
         trade_tracker.lock(ins, signal.direction.value, live_price,
                            trade_id, sl=sl, tp=tp)

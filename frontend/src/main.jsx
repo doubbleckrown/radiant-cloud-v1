@@ -5,16 +5,18 @@ import App from "./App.jsx";
 import "./index.css";
 
 // ── Global SW error guard ──────────────────────────────────────────────────────
-// Catches any SW-related unhandled promise rejections so they never surface
-// as a blank screen.  Must be the very first thing that runs.
+// Belt-and-suspenders: catches any SW-related unhandled rejections before they
+// can surface as a blank screen.  Must be the very first statement.
 //
-// With injectRegister:"auto", VitePWA injects a synchronous <script> into
-// index.html that registers the SW directly — no workbox-window, no lazy
-// class instantiation, so the "message handler must be added on initial
-// evaluation" timing error is eliminated at source.
-// This guard is kept as a belt-and-suspenders fallback for edge cases
-// (HTTPS cert delays, CDN path issues, etc.) that can still produce
-// unhandled rejections from the injected registration script.
+// WHY this is now largely redundant (but kept):
+//   vite.config.js has skipWaiting:true in the workbox config.  This makes the
+//   generated sw.js call self.skipWaiting() directly in its own install event —
+//   no SKIP_WAITING postMessage is ever sent from the client side.
+//   injectRegister:"auto" injects a plain navigator.serviceWorker.register()
+//   call with no workbox-window class, so there is no lazy .then() timing gap.
+//   The "postMessage / message handler must be added on initial evaluation"
+//   errors are eliminated at source.  This guard remains for edge cases only
+//   (HTTPS timing on first load, CDN path mismatches, etc.).
 window.addEventListener("unhandledrejection", (event) => {
   const msg = event?.reason?.message ?? String(event?.reason ?? "");
   if (
@@ -28,12 +30,11 @@ window.addEventListener("unhandledrejection", (event) => {
   }
 });
 
-// ── NOTE: No manual SW registration here ──────────────────────────────────────
-// With injectRegister:"auto" in vite.config.js, VitePWA injects a tiny
-// synchronous <script> into the built index.html that registers /sw.js.
-// Adding a SECOND registration call here via virtual:pwa-register would create
-// a race condition and re-introduce the message-handler timing error we just
-// fixed.  Leave SW lifecycle entirely to VitePWA's injected script.
+// ── NO manual SW registration ──────────────────────────────────────────────────
+// injectRegister:"auto" in vite.config.js makes VitePWA inject a synchronous
+// <script> into the built index.html that registers /sw.js directly.
+// A second registration call here would race with that injected script and
+// re-introduce the postMessage timing error we fixed.
 
 // ── Missing-key safety screen ─────────────────────────────────────────────────
 const PUBLISHABLE_KEY = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY;

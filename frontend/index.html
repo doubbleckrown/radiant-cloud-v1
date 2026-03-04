@@ -9,21 +9,33 @@
   <title>FX Radiant</title>
 
   <!--
+    ── PWA Icons ───────────────────────────────────────────────────────────────
+    favicon.ico  — browser tab icon (all browsers)
+    icon-192.png — apple-touch-icon for iOS "Add to Home Screen" + Android PWA
+    Without these two <link> tags the browser tab shows a broken icon and the
+    PWA install prompt has no icon regardless of what is in the manifest.
+    VitePWA injects the manifest <link> automatically at build time — do not
+    add it here or you get a duplicate.
+  -->
+  <link rel="icon" type="image/x-icon" href="/favicon.ico" />
+  <link rel="apple-touch-icon" sizes="192x192" href="/icon-192.png" />
+
+  <!--
     ── ANTI-FLASH: Mode Detection Script ──────────────────────────────────────
     Runs synchronously before ANY CSS or React code, so the very first paint
     already uses the persisted appMode.  This eliminates the "flash of green"
     on page refresh when the user is in CRYPTO mode.
 
     FOREX  → #00FF41  (Radiant Green)
-    CRYPTO → #FF9900  (Bybit Orange)
+    CRYPTO → #FFA500  (Bybit Orange)
   -->
   <script>
     (function () {
       try {
         var m = localStorage.getItem('fx-radiant-app-mode');
         var isCrypto  = m === 'CRYPTO';
-        var accent    = isCrypto ? '#FF9900'              : '#00FF41';
-        var accentHdr = isCrypto ? 'rgba(255,153,0,0.08)' : 'rgba(0,255,65,0.08)';
+        var accent    = isCrypto ? '#FFA500'              : '#00FF41';
+        var accentHdr = isCrypto ? 'rgba(0,180,200,0.08)' : 'rgba(0,255,65,0.08)';
         var r = document.documentElement;
         r.style.setProperty('--accent',     accent);
         r.style.setProperty('--accent-hdr', accentHdr);
