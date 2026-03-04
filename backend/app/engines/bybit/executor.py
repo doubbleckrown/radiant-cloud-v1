@@ -120,10 +120,21 @@ async def fetch_account(api_key: str, api_secret: str) -> dict:
 
     data = r.json()
     raise_on_error(data, "fetch_account")
-    acct = (data.get("result", {}).get("list") or [{}])[0]
+    raw_list = data.get("result", {}).get("list") or []
+    raw_acct = raw_list[0] if raw_list else {}
+    # Guard: Bybit can return a malformed list entry (None, float) under load —
+    # if the first element isn't a dict, calling .get() on it raises
+    # "float/NoneType object has no attribute 'get'". Fall back to {}.
+    acct: dict = raw_acct if isinstance(raw_acct, dict) else {}
     eq   = float(acct.get("totalEquity",           0) or 0)
     av   = float(acct.get("totalAvailableBalance", 0) or 0)
     mg   = float(acct.get("totalMarginBalance",    0) or 0)
+    # Coin entries can also be malformed — filter to dicts only
+    raw_coins = acct.get("coin") or []
+    coins = [
+        c for c in raw_coins
+        if isinstance(c, dict) and float(c.get("walletBalance", 0) or 0) > 0
+    ]
     return {
         "accountType":           acct.get("accountType", "UNIFIED"),
         "totalEquity":           round(eq, 2),
@@ -132,7 +143,7 @@ async def fetch_account(api_key: str, api_secret: str) -> dict:
         "totalAvailable":        round(av, 2),
         "totalMargin":           round(mg, 2),
         "totalUSDT":             round(eq, 2),
-        "coin": [c for c in acct.get("coin", []) if float(c.get("walletBalance", 0) or 0) > 0],
+        "coin":                  coins,
     }
 
 

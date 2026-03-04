@@ -67,12 +67,24 @@ async def fetch_candles(symbol: str, interval: str, limit: int = 200) -> list[Ca
 
 
 async def bybit_refresh_loop() -> None:
-    """Refresh tickers + candles every 60 s, run SMC, auto-execute at 100%."""
-    FETCH_TIMEOUT = 20.0
-    MAX_BACKOFF   = 60.0
+    """Refresh tickers + candles every 60 s, run SMC, auto-execute at 100%.
+
+    Rate-limit strategy (Bybit public kline: 10 req/s):
+      • CANDLE_DELAY_S = 0.12 s between every kline request → ≤8 req/s
+      • H1 fetched every cycle  — SMC analysis runs on H1 only
+      • M15/M5 fetched every 5 cycles — provides context, not critical path
+      • M1 fetched every 10 cycles   — only needed for very fine entry detail
+    19 symbols × 1 H1 = 19 req/cycle  → 19 × 0.12 = ~2.3 s per cycle
+    Full refresh (all 4 tf) = 76 req → 76 × 0.12 = ~9 s (well under 10 req/s)
+    """
+    FETCH_TIMEOUT  = 20.0
+    MAX_BACKOFF    = 60.0
+    CANDLE_DELAY_S = 0.12   # inter-request throttle — keeps us at ≤8 req/s
+    cycle          = 0
     fail_counts: dict[str, int] = {sym: 0 for sym in BYBIT_SYMBOLS}
 
     async def _safe_candles(sym: str, iv: str):
+        await asyncio.sleep(CANDLE_DELAY_S)   # throttle every request
         try:
             return await asyncio.wait_for(fetch_candles(sym, iv), timeout=FETCH_TIMEOUT)
         except asyncio.TimeoutError:
@@ -100,7 +112,15 @@ async def bybit_refresh_loop() -> None:
                 if backoff:
                     await asyncio.sleep(backoff)
 
-                for iv in BYBIT_INTERVALS:
+                # Always fetch H1 (SMC runs on H1 only).
+                # Fetch M15/M5 every 5th cycle, M1 every 10th — reduces
+                # per-cycle request count from 76 to 19 on normal cycles.
+                intervals_this_cycle = ["60"]
+                if cycle % 5  == 0: intervals_this_cycle.append("15")
+                if cycle % 5  == 0: intervals_this_cycle.append("5")
+                if cycle % 10 == 0: intervals_this_cycle.append("1")
+
+                for iv in intervals_this_cycle:
                     result = await _safe_candles(sym, iv)
                     if result is not None:
                         state.bybit_candle_cache[sym][iv] = result
@@ -153,4 +173,5 @@ async def bybit_refresh_loop() -> None:
             logger.error("bybit_refresh_loop error: %s — restart in 15s", loop_exc)
             await asyncio.sleep(15)
             continue
+        cycle += 1
         await asyncio.sleep(60)
