@@ -88,7 +88,19 @@ def sign_post(api_key: str, api_secret: str, body: dict) -> tuple[str, dict]:
     return body_str, _auth_headers(api_key, sig, ts)
 
 
-def raise_on_error(data: dict, ctx: str = "") -> None:
+def raise_on_error(data: object, ctx: str = "") -> None:
+    """
+    Check a Bybit V5 response dict for retCode != 0 and raise RuntimeError.
+
+    Bybit normally returns {"retCode": 0, ...} on success.  Under load or
+    network issues the body can be a bare number (0, 1.0), null, or a list —
+    all of which crash data.get() with 'float/NoneType/list object has no
+    attribute get'.  Guard here once so every caller is protected.
+    """
+    if not isinstance(data, dict):
+        raise RuntimeError(
+            f"Bybit returned non-dict response ({type(data).__name__}: {str(data)[:120]}) [{ctx}]"
+        )
     ret = data.get("retCode", -1)
     if ret == 0:
         return
@@ -386,8 +398,9 @@ async def auto_execute(sym: str, sig_dict: dict, signal: TradeSignal) -> None:
         logger.info("✅ BYBIT AUTO-EXEC: %s %s qty=%s lev=%d× entry=%.4f", sym, side, qty_str, lev, entry)
 
     except Exception as exc:
+        import traceback as _tb
         err = str(exc)
-        logger.error("Bybit AutoExec FAILED %s: %s", sym, err)
+        logger.error("Bybit AutoExec FAILED %s: %s\n%s", sym, err, _tb.format_exc())
         trade_tracker.unlock(sym)
         sig_dict["exec_status"] = "failed"
         sig_dict["exec_error"]  = err
