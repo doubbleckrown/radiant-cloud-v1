@@ -17,6 +17,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { motion, AnimatePresence }                   from "framer-motion";
 import { useAuthStore }                              from "../store/authStore";
+import { useAuth }                                     from "@clerk/clerk-react";
 import { useTheme }                                  from "../hooks/useTheme";
 import { useWebSocket }                              from "../hooks/useWebSocket";
 import api                                           from "../utils/api";
@@ -76,31 +77,36 @@ function isRecent(sig) {
 // ─────────────────────────────────────────────────────────────────────────────
 export default function SignalsPage() {
   const { isCrypto, accent, accentDim, accentBdr } = useTheme();
+  const { oanda_risk_pct, bybit_risk_pct, fetchProfile } = useAuthStore();
+  const { getToken } = useAuth();
   const [activeTab,  setActiveTab]  = useState("Active");
   const [signals,    setSignals]    = useState([]);
   const [tradeLocks, setTradeLocks] = useState({});
   const [loading,    setLoading]    = useState(true);
   const [error,      setError]      = useState(null);
   const [lastUpdate, setLastUpdate] = useState(null);
-  // Bot risk shown in header — pulled from server to stay in sync with ProfilePage
-  const [botRisk,    setBotRisk]    = useState(null);
+  // Bot risk — read directly from authStore (already populated by ProfilePage).
+  // On every mode switch, also re-fetch the profile so the value is fresh even
+  // if the user hasn't visited ProfilePage in this session.
+  const botRisk = isCrypto ? bybit_risk_pct : oanda_risk_pct;
   const pollRef = useRef(null);
 
-  // ── Pull authoritative risk % from server on every mount/mode switch ──────
-  // Prevents UI from showing a stale value after navigating away & back.
   useEffect(() => {
-    api.get("/settings")
-      .then(({ data }) => { if (data?.risk_pct != null) setBotRisk(data.risk_pct); })
-      .catch(() => {});
-  }, [isCrypto]);
+    getToken().then(token => fetchProfile(token)).catch(() => {});
+  }, [isCrypto]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── WebSocket for live Oanda signals (FOREX mode) ─────────────────────────
   const { lastMessage } = useWebSocket(isCrypto ? null : "/ws");
 
   useEffect(() => {
+    // GUARD: useWebSocket() always connects regardless of the URL argument.
+    // In CRYPTO mode the WS delivers Oanda signals which must not appear on
+    // the Bybit page. Drop all incoming WS messages when isCrypto is true —
+    // Bybit signals arrive via the 30-second REST poll (fetchSignals below).
+    if (isCrypto) return;
     if (!lastMessage) return;
     if (lastMessage.type === "SIGNAL" || lastMessage.type === "SIGNAL_HISTORY") {
-      // Merge incoming WS signals into state
+      // Merge incoming Oanda WS signals into state (FOREX mode only)
       const incoming = Array.isArray(lastMessage.signals)
         ? lastMessage.signals
         : [lastMessage];
@@ -115,7 +121,7 @@ export default function SignalsPage() {
       });
       setLastUpdate(Date.now());
     }
-  }, [lastMessage]);
+  }, [lastMessage, isCrypto]);
 
   // ── Fetch signals (REST) ──────────────────────────────────────────────────
   const fetchSignals = useCallback(async () => {

@@ -90,7 +90,16 @@ async def get_account(payload: dict = Depends(get_current_user)):
     if not creds:
         raise HTTPException(422, "No Oanda credentials — add OANDA_API_KEY/ACCOUNT_ID to .env")
     try:
-        return await fetch_account_summary(*creds)
+        summary = await fetch_account_summary(*creds)
+        # Oanda's openTradeCount = raw individual fills (e.g. 6 for 3 trades on 2 instruments).
+        # Fetch the aggregated position list so the Summary tab shows the number of
+        # open POSITIONS (instruments with exposure), matching the Open Trades tab card count.
+        try:
+            positions = await fetch_open_trades(*creds)
+            summary["openTradeCount"] = len(positions)
+        except Exception:
+            pass  # fall back to Oanda's raw count on any error
+        return summary
     except Exception as e:
         raise HTTPException(503, f"Oanda error: {e}")
 
@@ -107,12 +116,35 @@ async def get_open_trades(_: dict = Depends(get_current_user)):
 
 
 @router.get("/account/history")
-async def get_trade_history(_: dict = Depends(get_current_user)):
+async def get_trade_history(
+    count:     int          = 500,
+    before_id: str | None   = None,
+    fetch_all: bool         = True,
+    _:         dict         = Depends(get_current_user),
+):
+    """
+    Return closed trade history.
+
+    Query params
+    ------------
+    count     : Trades per page, max 500 (default 500).
+    before_id : Cursor — return trades older than this trade ID.
+                Use the id of the last trade in the current set to load
+                the next page (Load More).
+    fetch_all : If true (default), paginate automatically and return all
+                trades up to 2,000 in a single response. Set false to get
+                a single page.
+    """
     creds = get_oanda_creds()
     if not creds:
         raise HTTPException(422, "No Oanda credentials")
     try:
-        return await fetch_trade_history(*creds, count=50)
+        return await fetch_trade_history(
+            *creds,
+            count     = min(count, 500),
+            before_id = before_id,
+            fetch_all = fetch_all,
+        )
     except Exception as e:
         raise HTTPException(503, f"Oanda error: {e}")
 

@@ -46,32 +46,145 @@ async def fetch_account_summary(api_key: str, account_id: str) -> dict:
 
 
 async def fetch_open_trades(api_key: str, account_id: str) -> list:
+    """
+    Fetch all open trades and aggregate them by instrument into net positions.
+
+    Oanda allows multiple individual trade executions per instrument (each fill
+    from a market order creates a separate trade object with its own ID, units,
+    entry price, and unrealizedPL).  The old implementation kept only the
+    most-recent trade by ID, which:
+      • discarded trades with earlier IDs (wrong units shown)
+      • omitted their unrealizedPL (causing the P&L shortfall vs the website)
+      • caused openTradeCount in the Summary tab to diverge from the card count
+
+    This version aggregates all trades per instrument — matching Oanda's own
+    Positions tab — by:
+      • summing currentUnits (positive = net long, negative = net short)
+      • summing unrealizedPL across all trades for that instrument
+      • computing a units-weighted average entry price
+      • recording every individual tradeId so close operations work correctly
+
+    The returned list has one object per instrument, matching what the
+    AccountPage Open Trades tab expects to render as one position card.
+    """
     async with httpx.AsyncClient(timeout=30) as c:
         r = await c.get(f"{OANDA_BASE}/v3/accounts/{account_id}/openTrades", headers=_headers(api_key))
         r.raise_for_status()
     trades = r.json().get("trades", [])
-    # Deduplication: group by instrument, keep one entry per pair (most recent)
-    seen: dict[str, dict] = {}
+
+    # Aggregate all trades per instrument into a net position
+    agg: dict[str, dict] = {}
     for t in trades:
-        ins = t.get("instrument", "")
-        if ins not in seen:
-            seen[ins] = t
+        ins        = t.get("instrument", "")
+        units      = int(t.get("currentUnits", 0))
+        upl        = float(t.get("unrealizedPL", 0) or 0)
+        price      = float(t.get("price", 0) or 0)
+        trade_id   = t.get("id", "")
+        open_time  = t.get("openTime", "")
+        margin     = float(t.get("marginUsed", 0) or 0)
+
+        if ins not in agg:
+            agg[ins] = {
+                "instrument":  ins,
+                "currentUnits": units,
+                "unrealizedPL": upl,
+                # Weighted average entry price (weight = abs units)
+                "_price_num":  abs(units) * price,
+                "_price_den":  abs(units),
+                "openTime":    open_time,
+                "marginUsed":  margin,
+                # Most recent trade ID used as the primary id for the card.
+                # tradeIds lists ALL IDs so the close route can close all of them.
+                "id":          trade_id,
+                "tradeIds":    [trade_id] if trade_id else [],
+            }
         else:
-            # Keep the trade with the higher (more recent) numeric ID
-            if int(t.get("id", 0)) > int(seen[ins].get("id", 0)):
-                seen[ins] = t
-    return list(seen.values())
+            a = agg[ins]
+            a["currentUnits"] += units
+            a["unrealizedPL"] = round(a["unrealizedPL"] + upl, 5)
+            a["_price_num"]   += abs(units) * price
+            a["_price_den"]   += abs(units)
+            a["marginUsed"]    = round(a["marginUsed"] + margin, 5)
+            # Keep earliest openTime
+            if open_time and open_time < a["openTime"]:
+                a["openTime"] = open_time
+            # Advance the primary id to the most recent trade
+            if trade_id and int(trade_id) > int(a["id"] or 0):
+                a["id"] = trade_id
+            if trade_id:
+                a["tradeIds"].append(trade_id)
+
+    # Finalise: compute weighted average price, clean up working keys
+    positions = []
+    for ins, a in agg.items():
+        a["price"] = round(a["_price_num"] / a["_price_den"], 5) if a["_price_den"] else 0.0
+        del a["_price_num"]
+        del a["_price_den"]
+        positions.append(a)
+
+    return positions
 
 
-async def fetch_trade_history(api_key: str, account_id: str, count: int = 50) -> list:
+async def fetch_trade_history(
+    api_key:    str,
+    account_id: str,
+    count:      int = 500,       # Oanda V20 max per page is 500
+    before_id:  str | None = None,
+    fetch_all:  bool = True,     # paginate through all pages by default
+    max_total:  int = 2000,      # safety cap — stops pagination at this total
+) -> list:
+    """
+    Fetch closed trade history from Oanda V20.
+
+    Oanda returns at most 500 trades per call (sorted newest-first).
+    When fetch_all=True (default) this function paginates automatically using
+    the beforeID cursor until either:
+      • the API returns fewer than `count` trades (last page), or
+      • max_total trades have been accumulated (safety cap).
+
+    Parameters
+    ----------
+    count      : Trades per page (max 500 per Oanda V20 spec).
+    before_id  : Fetch trades before this trade ID (cursor for pagination).
+                 Pass the last trade's id from a previous call to load the
+                 next page. If None, fetch from the most recent trade.
+    fetch_all  : If True, loop through all pages automatically.
+                 If False, return only the first page (single API call).
+    max_total  : Hard cap on total trades returned to prevent runaway loops.
+    """
+    all_trades: list = []
+    cursor = before_id
+    per_page = max(1, min(count, 500))
+
     async with httpx.AsyncClient(timeout=30) as c:
-        r = await c.get(
-            f"{OANDA_BASE}/v3/accounts/{account_id}/trades",
-            headers=_headers(api_key),
-            params={"state": "CLOSED", "count": str(count)},
-        )
-        r.raise_for_status()
-    return r.json().get("trades", [])
+        while True:
+            params: dict = {"state": "CLOSED", "count": str(per_page)}
+            if cursor:
+                params["beforeID"] = cursor
+
+            r = await c.get(
+                f"{OANDA_BASE}/v3/accounts/{account_id}/trades",
+                headers=_headers(api_key),
+                params=params,
+            )
+            r.raise_for_status()
+            page = r.json().get("trades", [])
+            all_trades.extend(page)
+
+            # Stop conditions:
+            #   1. Not paginating — single call mode
+            #   2. Page is smaller than per_page → we're on the last page
+            #   3. Accumulated max_total trades
+            if not fetch_all or len(page) < per_page or len(all_trades) >= max_total:
+                break
+
+            # Advance cursor to the ID of the oldest trade in this page
+            # (Oanda returns newest-first, so page[-1] is the oldest)
+            cursor = page[-1].get("id")
+            if not cursor:
+                break
+
+    return all_trades[:max_total]
 
 
 async def fetch_candles(instrument: str, granularity: str, count: int = 250) -> list[Candle]:

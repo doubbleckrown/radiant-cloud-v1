@@ -72,6 +72,9 @@ export default function AccountPage() {
   const [account,         setAccount]         = useState(null);
   const [trades,          setTrades]          = useState([]);
   const [history,         setHistory]         = useState([]);
+  const [historyCursor,   setHistoryCursor]   = useState(null);   // beforeID for next page
+  const [historyExhausted,setHistoryExhausted]= useState(false);  // true = no more pages
+  const [loadingMore,     setLoadingMore]     = useState(false);
   const [sparklinePoints, setSparklinePoints] = useState([]);
 
   // ── Bybit engine state (never mutated in FOREX mode) ──────────────────────
@@ -85,7 +88,7 @@ export default function AccountPage() {
 
   // ── OANDA: eagerly load history for the header sparkline (FOREX) ──────────
   useEffect(() => {
-    api.get("/account/history")
+    api.get("/account/history?fetch_all=true&count=500")
       .then(({ data }) => {
         if (!Array.isArray(data) || data.length === 0) return;
         const sorted = [...data].sort(
@@ -164,9 +167,46 @@ export default function AccountPage() {
 
   const loadOandaHistory = useCallback(async () => {
     mark("History", true);
-    try   { const { data } = await api.get("/account/history"); setHistory(data ?? []); mark("History", false); }
-    catch (e) { mark("History", false, e.userMessage ?? "Could not load history"); }
+    try {
+      // fetch_all=true (default) — server paginates automatically and returns
+      // everything up to 2,000 trades in one shot.
+      const { data } = await api.get("/account/history?fetch_all=true&count=500");
+      const trades   = data ?? [];
+      setHistory(trades);
+      // If exactly 2000 came back the server hit its cap — there may be more.
+      // Store the oldest trade ID as cursor so "Load More" can fetch the next page.
+      if (trades.length >= 2000) {
+        setHistoryCursor(trades[trades.length - 1]?.id ?? null);
+        setHistoryExhausted(false);
+      } else {
+        setHistoryCursor(null);
+        setHistoryExhausted(true);
+      }
+      mark("History", false);
+    } catch (e) {
+      mark("History", false, e.userMessage ?? "Could not load history");
+    }
   }, []);
+
+  const loadMoreOandaHistory = useCallback(async () => {
+    if (!historyCursor || loadingMore) return;
+    setLoadingMore(true);
+    try {
+      const { data } = await api.get(
+        `/account/history?fetch_all=true&count=500&before_id=${historyCursor}`
+      );
+      const next = data ?? [];
+      setHistory(prev => [...prev, ...next]);
+      if (next.length >= 2000) {
+        setHistoryCursor(next[next.length - 1]?.id ?? null);
+        setHistoryExhausted(false);
+      } else {
+        setHistoryCursor(null);
+        setHistoryExhausted(true);
+      }
+    } catch { /* silently ignore — already showing existing history */ }
+    finally { setLoadingMore(false); }
+  }, [historyCursor, loadingMore]);
 
   // ── Bybit load functions ─────────────────────────────────────────────────
   const loadBybitAccount = useCallback(async () => {
@@ -398,6 +438,8 @@ export default function AccountPage() {
                 onRetry={retryFns.History}
                 isCrypto={isCrypto}
                 accent={accent}
+                onLoadMore={!isCrypto && !historyExhausted ? loadMoreOandaHistory : null}
+                loadingMore={!isCrypto && loadingMore}
               />
             )}
           </motion.div>
@@ -927,7 +969,7 @@ function CloseTradeButton({ onClose, isLoading }) {
 // ─────────────────────────────────────────────────────────────────────────────
 //  History tab — Oanda or Bybit closed trades, selected by isCrypto
 // ─────────────────────────────────────────────────────────────────────────────
-function HistoryTab({ history, loading, error, onRetry, isCrypto, accent }) {
+function HistoryTab({ history, loading, error, onRetry, isCrypto, accent, onLoadMore, loadingMore }) {
   const [openId, setOpenId] = useState(null);
 
   if (loading) return <TabLoading />;
@@ -1053,6 +1095,34 @@ function HistoryTab({ history, loading, error, onRetry, isCrypto, accent }) {
           </motion.div>
         );
       })}
+      {/* ── Load More — shown only for Oanda when more pages exist ──────── */}
+      {onLoadMore && (
+        <div style={{ display: "flex", justifyContent: "center", padding: "16px 0 4px" }}>
+          <button
+            onClick={onLoadMore}
+            disabled={loadingMore}
+            style={{
+              padding: "10px 28px", borderRadius: 12, cursor: loadingMore ? "not-allowed" : "pointer",
+              background: loadingMore ? "rgba(255,255,255,0.04)" : `${accent}0f`,
+              border: `1px solid ${loadingMore ? "rgba(255,255,255,0.1)" : `${accent}35`}`,
+              color: loadingMore ? "#555" : accent,
+              fontSize: "0.75rem", fontWeight: 700, fontFamily: "'Inter', sans-serif",
+              display: "flex", alignItems: "center", gap: 8, transition: "all 0.2s",
+            }}
+          >
+            {loadingMore ? (
+              <>
+                <span style={{
+                  width: 12, height: 12, borderRadius: "50%",
+                  border: "2px solid transparent", borderTopColor: accent,
+                  display: "inline-block", animation: "spin 0.6s linear infinite",
+                }} />
+                Loading…
+              </>
+            ) : "Load older trades"}
+          </button>
+        </div>
+      )}
     </div>
   );
 }

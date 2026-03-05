@@ -67,11 +67,17 @@ def sign_get(api_key: str, api_secret: str, params: dict) -> tuple[dict, dict]:
     """
     Sign a GET request.
     String: ts + apiKey + recvWindow + queryString (sorted params, url-encoded once).
+
+    FIX: must return the SORTED params dict so httpx encodes them in exactly
+    the same order that was signed. Returning the original unsorted dict causes
+    httpx to encode in insertion order, producing a different query string than
+    the one that was signed → retCode 10004 invalid signature.
     """
-    ts  = _ts()
-    qs  = urllib.parse.urlencode(sorted(params.items()))
-    sig = _sign(api_secret, ts + api_key + BYBIT_RECV_WINDOW + qs)
-    return params, _auth_headers(api_key, sig, ts)
+    ts          = _ts()
+    sorted_items = sorted(params.items())
+    qs          = urllib.parse.urlencode(sorted_items)
+    sig         = _sign(api_secret, ts + api_key + BYBIT_RECV_WINDOW + qs)
+    return dict(sorted_items), _auth_headers(api_key, sig, ts)
 
 
 def sign_post(api_key: str, api_secret: str, body: dict) -> tuple[str, dict]:

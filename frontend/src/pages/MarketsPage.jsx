@@ -116,6 +116,11 @@ export default function MarketsPage() {
   const [granularity,        setGranularity]        = useState("H1");
   const prevPricesRef = useRef({});
 
+  // ── Signal levels (for TP/SL chart lines) ────────────────────────────────
+  // Keyed by instrument/symbol → most recent signal object
+  const [oandaSignals, setOandaSignals] = useState({});
+  const [bybitSignals, setBybitSignals] = useState({});
+
   // ── Oanda WebSocket ───────────────────────────────────────────────────────
   const { lastMessage } = useWebSocket(isCrypto ? null : "/ws");
 
@@ -144,18 +149,25 @@ export default function MarketsPage() {
   const fetchOandaAnalysis = useCallback(async () => {
     if (isCrypto) return;
     try {
-      const { data } = await api.get("/markets", { headers: { "X-App-Mode": "FOREX" } });
-      const map      = {};
+      const [{ data }, sigRes] = await Promise.all([
+        api.get("/markets",  { headers: { "X-App-Mode": "FOREX" } }),
+        api.get("/signals",  { headers: { "X-App-Mode": "FOREX" } }).catch(() => ({ data: [] })),
+      ]);
+      const map       = {};
       const changeMap = {};
       for (const item of (data ?? [])) {
         map[item.instrument]      = item;
-        // Oanda 24h change now returned by /api/markets — store alongside Bybit meta
-        if (item.change24h != null) {
-          changeMap[item.instrument] = item.change24h;
-        }
+        if (item.change24h != null) changeMap[item.instrument] = item.change24h;
       }
       setAnalysis(map);
       setOandaChange24(changeMap);
+      // Most-recent signal per instrument for TP/SL chart lines
+      const sigMap = {};
+      for (const sig of (sigRes.data ?? [])) {
+        const ins = sig.instrument ?? "";
+        if (ins && !sigMap[ins]) sigMap[ins] = sig;   // already sorted newest-first
+      }
+      setOandaSignals(sigMap);
     } catch { /* non-critical */ }
   }, [isCrypto]);
 
@@ -170,7 +182,10 @@ export default function MarketsPage() {
   const fetchBybitMarket = useCallback(async () => {
     if (!isCrypto) return;
     try {
-      const { data } = await api.get("/bybit/market", { headers: { "X-App-Mode": "CRYPTO" } });
+      const [{ data }, sigRes] = await Promise.all([
+        api.get("/bybit/market",  { headers: { "X-App-Mode": "CRYPTO" } }),
+        api.get("/bybit/signals", { headers: { "X-App-Mode": "CRYPTO" } }).catch(() => ({ data: [] })),
+      ]);
       const priceMap    = {};
       const analysisMap = {};
       const metaMap     = {};
@@ -190,6 +205,13 @@ export default function MarketsPage() {
       setBybitPrices(p    => ({ ...p,    ...priceMap    }));
       setBybitAnalysis(a  => ({ ...a,    ...analysisMap }));
       setBybitMeta(m      => ({ ...m,    ...metaMap     }));
+      // Most-recent signal per symbol for TP/SL chart lines
+      const sigMap = {};
+      for (const sig of (sigRes.data ?? [])) {
+        const sym = sig.symbol ?? sig.instrument ?? "";
+        if (sym && !sigMap[sym]) sigMap[sym] = sig;   // already sorted newest-first
+      }
+      setBybitSignals(sigMap);
     } catch { /* non-critical */ }
   }, [isCrypto]);
 
@@ -295,8 +317,8 @@ export default function MarketsPage() {
 
           // ── 100% Panic Glow — spec colours from design brief ────────────
           const isPanic    = conf >= 100;
-          const isBull100  = isPanic && (bias === "LONG"  || bias === "BULLISH");
-          const isBear100  = isPanic && (bias === "SHORT" || bias === "BEARISH");
+          const isBull100  = isPanic && (bias === "LONG"  || bias === "BULL");
+          const isBear100  = isPanic && (bias === "SHORT" || bias === "BEAR");
           const panicGlow  = isBull100
             ? "drop-shadow(0 0 15px #4ADE80) drop-shadow(0 0 6px #4ADE8060)"
             : isBear100
@@ -432,6 +454,7 @@ export default function MarketsPage() {
                       accent={accent}
                       meta={meta}
                       analysis={activeAnalysis[instrument]}
+                      signal={isCrypto ? bybitSignals[instrument] : oandaSignals[instrument]}
                     />
                   </motion.div>
                 )}
@@ -446,9 +469,9 @@ export default function MarketsPage() {
 
 // ── ConfBadge ─────────────────────────────────────────────────────────────────
 function ConfBadge({ conf, bias, accent }) {
-  const isBullish  = bias === "LONG"  || bias === "BULLISH";
-  const isBearish  = bias === "SHORT" || bias === "BEARISH";
-  const biasLabel  = isBullish ? "BULLISH" : isBearish ? "BEARISH" : "";
+  const isBullish  = bias === "LONG"  || bias === "BULL";
+  const isBearish  = bias === "SHORT" || bias === "BEAR";
+  const biasLabel  = isBullish ? "BULL" : isBearish ? "BEAR" : "";
 
   // ── Layered Confluence Color Evolution (matches SignalsPage spec) ─────────
   // L1 (34%) : Grey       — Directional bias only
@@ -491,12 +514,22 @@ function ConfBadge({ conf, bias, accent }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  InlineChart — candlestick for both Oanda and Bybit
+//  InlineChart — candlestick + TP/SL/Entry price lines for Oanda and Bybit
 // ─────────────────────────────────────────────────────────────────────────────
-function InlineChart({ instrument, isCrypto, granularity, setGranularity, accent, meta, analysis }) {
+//  Price lines are drawn via series.createPriceLine() using lightweight-charts
+//  native API. Three lines per signal:
+//    ● Entry — white dashed   (where the bot entered)
+//    ● TP    — green solid    (take-profit target)
+//    ● SL    — red dashed     (stop-loss invalidation level)
+//  Lines are added/removed whenever the `signal` prop changes.
+//  LineStyle values: 0=Solid, 1=Dotted, 2=Dashed, 3=LargeDashed
+// ─────────────────────────────────────────────────────────────────────────────
+function InlineChart({ instrument, isCrypto, granularity, setGranularity, accent, meta, analysis, signal }) {
   const chartRef      = useRef(null);
   const chartInstance = useRef(null);
   const seriesRef     = useRef(null);
+  // Keep refs to active price lines so we can remove them before re-drawing
+  const priceLinesRef = useRef([]);
   const [loading, setLoading] = useState(true);
   const [error,   setError]   = useState(null);
 
@@ -504,11 +537,12 @@ function InlineChart({ instrument, isCrypto, granularity, setGranularity, accent
   const BYBIT_GRAN  = ["M1", "M5", "M15", "H1"];
   const grans       = isCrypto ? BYBIT_GRAN : OANDA_GRAN;
 
+  // ── Chart initialisation (once per mount) ─────────────────────────────────
   useEffect(() => {
     if (!chartRef.current) return;
     const chart = createChart(chartRef.current, {
       width:  chartRef.current.clientWidth,
-      height: 220,
+      height: 240,
       layout:      { background: { color: "transparent" }, textColor: C.sub },
       grid:        { vertLines: { color: "rgba(255,255,255,0.04)" }, horzLines: { color: "rgba(255,255,255,0.04)" } },
       crosshair:   { mode: 1 },
@@ -516,8 +550,8 @@ function InlineChart({ instrument, isCrypto, granularity, setGranularity, accent
       timeScale:       { borderColor: "rgba(255,255,255,0.1)", timeVisible: true, secondsVisible: false },
     });
     const series = chart.addCandlestickSeries({
-      upColor:    accent,
-      downColor:  C.red,
+      upColor:         accent,
+      downColor:       C.red,
       borderUpColor:   accent,
       borderDownColor: C.red,
       wickUpColor:     accent,
@@ -533,6 +567,7 @@ function InlineChart({ instrument, isCrypto, granularity, setGranularity, accent
     return () => { ro.disconnect(); chart.remove(); };
   }, []); // eslint-disable-line
 
+  // ── Candle data fetch (re-runs on instrument / granularity / mode change) ──
   useEffect(() => {
     if (!seriesRef.current) return;
     setLoading(true);
@@ -560,10 +595,76 @@ function InlineChart({ instrument, isCrypto, granularity, setGranularity, accent
       .catch(() => { setError("Could not load candles"); setLoading(false); });
   }, [instrument, granularity, isCrypto]); // eslint-disable-line
 
+  // ── TP / SL / Entry price lines ───────────────────────────────────────────
+  // Re-drawn every time the signal prop changes (new signal fired, or chart
+  // opens for an instrument that already has one).
+  useEffect(() => {
+    const series = seriesRef.current;
+    if (!series) return;
+
+    // Remove any previously drawn lines first
+    for (const line of priceLinesRef.current) {
+      try { series.removePriceLine(line); } catch { /* already gone */ }
+    }
+    priceLinesRef.current = [];
+
+    if (!signal) return;
+
+    const entry = parseFloat(signal.entry ?? signal.entry_price ?? 0);
+    const sl    = parseFloat(signal.sl    ?? signal.stop_loss   ?? 0);
+    const tp    = parseFloat(signal.tp    ?? signal.take_profit ?? 0);
+    if (!entry || !sl || !tp) return;
+
+    const isLong = signal.direction === "LONG";
+
+    // Entry line — white dashed, subtle
+    const entryLine = series.createPriceLine({
+      price:      entry,
+      color:      "rgba(255,255,255,0.55)",
+      lineWidth:  1,
+      lineStyle:  2,             // Dashed
+      axisLabelVisible: true,
+      title:      "ENTRY",
+    });
+
+    // TP line — green solid, labelled with RR
+    const rr      = signal.rr ?? (Math.abs(tp - entry) / Math.abs(entry - sl)).toFixed(1);
+    const tpLine  = series.createPriceLine({
+      price:      tp,
+      color:      "#00FF41",
+      lineWidth:  1,
+      lineStyle:  0,             // Solid
+      axisLabelVisible: true,
+      title:      `TP  1:${typeof rr === "number" ? rr.toFixed(1) : rr}`,
+    });
+
+    // SL line — red dashed
+    const slLine  = series.createPriceLine({
+      price:      sl,
+      color:      "#FF3A3A",
+      lineWidth:  1,
+      lineStyle:  2,             // Dashed
+      axisLabelVisible: true,
+      title:      `SL  ${isLong ? "▼" : "▲"}`,
+    });
+
+    priceLinesRef.current = [entryLine, tpLine, slLine];
+  }, [signal]); // eslint-disable-line
+
+  // Signal metadata for the legend strip below the toolbar
+  const hasSignal = Boolean(signal && signal.sl && signal.tp);
+  const sigEntry  = parseFloat(signal?.entry ?? signal?.entry_price ?? 0);
+  const sigSl     = parseFloat(signal?.sl    ?? signal?.stop_loss   ?? 0);
+  const sigTp     = parseFloat(signal?.tp    ?? signal?.take_profit ?? 0);
+  const sigDir    = signal?.direction ?? "";
+  const sigRr     = signal?.rr ?? (sigEntry && sigSl ? (Math.abs(sigTp - sigEntry) / Math.abs(sigEntry - sigSl)).toFixed(1) : "—");
+  const dp        = meta?.decimals ?? 5;
+
   return (
     <div style={{ padding: "0 12px 14px" }}>
-      {/* Granularity selector */}
-      <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
+
+      {/* ── Toolbar: granularity + SMC tags ─────────────────────────────── */}
+      <div style={{ display: "flex", gap: 6, marginBottom: 8, alignItems: "center" }}>
         {grans.map(g => (
           <button
             key={g}
@@ -578,16 +679,46 @@ function InlineChart({ instrument, isCrypto, granularity, setGranularity, accent
             }}
           >{g}</button>
         ))}
-        {/* SMC analysis summary */}
-        {analysis && (
-          <div style={{ marginLeft: "auto", display: "flex", gap: 6, alignItems: "center" }}>
-            {analysis.layer2 && <MiniTag label="OB/FVG" accent={accent} />}
-            {analysis.layer3 && <MiniTag label="MSS"    accent={accent} />}
-          </div>
-        )}
+        <div style={{ marginLeft: "auto", display: "flex", gap: 6, alignItems: "center" }}>
+          {analysis?.layer2 && <MiniTag label="OB/FVG" accent={accent} />}
+          {analysis?.layer3 && <MiniTag label="MSS"    accent={accent} />}
+          {hasSignal && (
+            <MiniTag
+              label={sigDir === "LONG" ? "▲ LONG" : "▼ SHORT"}
+              accent={sigDir === "LONG" ? "#00FF41" : "#FF3A3A"}
+            />
+          )}
+        </div>
       </div>
 
-      {/* Chart container */}
+      {/* ── TP/SL legend strip — shown only when a signal is present ─────── */}
+      {hasSignal && (
+        <div style={{
+          display: "flex", gap: 6, marginBottom: 8, flexWrap: "wrap",
+        }}>
+          {[
+            { label: "ENTRY", val: sigEntry.toFixed(dp), color: "rgba(255,255,255,0.7)", bg: "rgba(255,255,255,0.05)", bd: "rgba(255,255,255,0.15)" },
+            { label: "TP",    val: sigTp.toFixed(dp),    color: "#00FF41",               bg: "rgba(0,255,65,0.06)",    bd: "rgba(0,255,65,0.25)"    },
+            { label: "SL",    val: sigSl.toFixed(dp),    color: "#FF3A3A",               bg: "rgba(255,58,58,0.06)",   bd: "rgba(255,58,58,0.25)"   },
+            { label: "R:R",   val: `1 : ${sigRr}`,       color: accent,                  bg: `${accent}08`,            bd: `${accent}30`            },
+          ].map(({ label, val, color, bg, bd }) => (
+            <div key={label} style={{
+              display: "flex", alignItems: "center", gap: 5,
+              padding: "4px 10px", borderRadius: 8,
+              background: bg, border: `1px solid ${bd}`,
+            }}>
+              <span style={{ color: "rgba(255,255,255,0.35)", fontSize: "0.55rem", fontFamily: FONT_UI, letterSpacing: "0.08em" }}>
+                {label}
+              </span>
+              <span style={{ color, fontSize: "0.7rem", fontWeight: 700, fontFamily: FONT_MONO }}>
+                {val}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* ── Chart canvas ─────────────────────────────────────────────────── */}
       <div style={{ position: "relative", borderRadius: 10, overflow: "hidden" }}>
         <div ref={chartRef} style={{ width: "100%" }} />
         {loading && (
@@ -609,6 +740,13 @@ function InlineChart({ instrument, isCrypto, granularity, setGranularity, accent
           </div>
         )}
       </div>
+
+      {/* No-signal note — only shown when the chart is open but no signal yet */}
+      {!hasSignal && !loading && (
+        <p style={{ color: C.sub, fontSize: "0.6rem", textAlign: "center", margin: "8px 0 0", fontFamily: FONT_MONO }}>
+          No active signal — TP/SL lines will appear when the bot fires on this instrument
+        </p>
+      )}
     </div>
   );
 }
