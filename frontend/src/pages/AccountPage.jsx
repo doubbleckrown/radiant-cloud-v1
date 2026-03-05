@@ -208,6 +208,45 @@ export default function AccountPage() {
     finally { setLoadingMore(false); }
   }, [historyCursor, loadingMore]);
 
+  // ── Real-time P&L: silently re-fetch open positions every 5 s ─────────────
+  // No loading spinner — just updates `unrealizedPL` / `unrealisedPnl` in state.
+  const liveTradesPollRef = useRef(null);
+
+  const refreshLiveOandaTrades = useCallback(async () => {
+    try {
+      const { data } = await api.get("/account/trades");
+      if (Array.isArray(data)) setTrades(data);
+    } catch { /* silently ignore — stale data is fine */ }
+  }, []);
+
+  const refreshLiveBybitPositions = useCallback(async () => {
+    try {
+      const { data } = await api.get("/bybit/account/positions", { headers: BYBIT_HEADERS });
+      if (Array.isArray(data)) setBybitPositions(data);
+    } catch { /* silently ignore */ }
+  }, []);
+
+  // Start/stop live P&L polling whenever "Open Trades" tab is active
+  useEffect(() => {
+    if (activeTab !== "Open Trades") {
+      if (liveTradesPollRef.current) {
+        clearInterval(liveTradesPollRef.current);
+        liveTradesPollRef.current = null;
+      }
+      return;
+    }
+    const refresh = isCrypto ? refreshLiveBybitPositions : refreshLiveOandaTrades;
+    // Immediate refresh when tab opens, then every 5 seconds
+    refresh();
+    liveTradesPollRef.current = setInterval(refresh, 5_000);
+    return () => {
+      if (liveTradesPollRef.current) {
+        clearInterval(liveTradesPollRef.current);
+        liveTradesPollRef.current = null;
+      }
+    };
+  }, [activeTab, isCrypto, refreshLiveOandaTrades, refreshLiveBybitPositions]);
+
   // ── Bybit load functions ─────────────────────────────────────────────────
   const loadBybitAccount = useCallback(async () => {
     mark("Summary", true);
@@ -748,30 +787,32 @@ function OpenTradesTab({ trades, loading, error, onRetry, isCrypto, accent, clos
         // ── Normalize display fields for BOTH engines ──────────────────────
         const norm = isCrypto
           ? {
-              id:      t.symbol ?? String(i),
-              ins:     typeof t.symbol === "string"
-                         ? t.symbol.replace(/USDT$/, "/USDT").replace(/USDC$/, "/USDC")
-                         : "—",
-              isLong:  (typeof t.side === "string" ? t.side : "") === "Buy",
-              units:   Math.abs(parseFloat(t.size ?? t.qty ?? 0)),
+              id:       t.symbol ?? String(i),
+              ins:      typeof t.symbol === "string"
+                          ? t.symbol.replace(/USDT$/, "/USDT").replace(/USDC$/, "/USDC")
+                          : "—",
+              isLong:   (typeof t.side === "string" ? t.side : "") === "Buy",
+              units:    Math.abs(parseFloat(t.size ?? t.qty ?? 0)),
               entryFmt: parseFloat(t.avgPrice ?? 0).toFixed(2),
-              risk:    `$${parseFloat(t.positionValue ?? t.posValue ?? 0).toFixed(2)}`,
-              riskLbl: "Pos. Value",
-              pnl:     parseFloat(t.unrealisedPnl ?? t.unrealizedPnl ?? 0),
-              openTs:  t.createdTime
-                         ? new Date(parseInt(t.createdTime)).toLocaleString()
-                         : "—",
+              // Risk Capital = initial margin posted (positionIM), not notional
+              risk:     `$${parseFloat(t.positionIM ?? t.positionValue ?? 0).toFixed(2)}`,
+              riskLbl:  "Risk Capital",
+              pnl:      parseFloat(t.unrealisedPnl ?? t.unrealizedPnl ?? 0),
+              openTs:   t.createdTime
+                          ? new Date(parseInt(t.createdTime)).toLocaleString()
+                          : "—",
             }
           : {
-              id:      t.id ?? String(i),
-              ins:     (t.instrument ?? "").replace("_", "/"),
-              isLong:  parseInt(t.currentUnits ?? t.initialUnits ?? 0) > 0,
-              units:   Math.abs(parseInt(t.currentUnits ?? t.initialUnits ?? 0)),
+              id:       t.id ?? String(i),
+              ins:      (t.instrument ?? "").replace("_", "/"),
+              isLong:   parseInt(t.currentUnits ?? t.initialUnits ?? 0) > 0,
+              units:    Math.abs(parseInt(t.currentUnits ?? t.initialUnits ?? 0)),
               entryFmt: parseFloat(t.price ?? 0).toFixed(5),
-              risk:    `$${parseFloat(t.marginUsed ?? 0).toFixed(2)}`,
-              riskLbl: "Margin",
-              pnl:     parseFloat(t.unrealizedPL ?? 0),
-              openTs:  t.openTime ? new Date(t.openTime).toLocaleString() : "—",
+              // Risk Capital = actual margin locked by Oanda for this position
+              risk:     `$${parseFloat(t.marginUsed ?? 0).toFixed(2)}`,
+              riskLbl:  "Risk Capital",
+              pnl:      parseFloat(t.unrealizedPL ?? 0),
+              openTs:   t.openTime ? new Date(t.openTime).toLocaleString() : "—",
             };
 
         const pnlColor = norm.pnl >= 0 ? C.green : C.red;
@@ -1147,6 +1188,11 @@ function normalizeTrade(t, isCrypto, kind) {
     const commission = parseFloat(t.commission ?? 0);
     const margin     = parseFloat(t.marginUsed ?? 0);
 
+    const slPxOanda  = parseFloat(t.stopLossPrice   ?? t.stopLossOrder?.price  ?? t.stopLossOrderID  ?? 0);
+    const tpPxOanda  = parseFloat(t.takeProfitPrice ?? t.takeProfitOrder?.price ?? t.takeProfitOrderID ?? 0);
+    const slUsdOanda = parseFloat(t.slAmountUSD ?? 0);
+    const tpUsdOanda = parseFloat(t.tpAmountUSD ?? 0);
+
     return {
       instrument: (t.instrument ?? "").replace("_", "/"),
       isLong:     rawUnits > 0,
@@ -1155,10 +1201,12 @@ function normalizeTrade(t, isCrypto, kind) {
       pnlLabel:   isHistory ? "Realized P&L" : "Unrealized P&L",
       entryPx:    parseFloat(t.price ?? 0),
       closePx:    parseFloat(t.averageClosePrice ?? 0),
-      slPx:       parseFloat(t.stopLossOrder?.price    ?? t.stopLossOrderID   ?? 0),
-      tpPx:       parseFloat(t.takeProfitOrder?.price  ?? t.takeProfitOrderID ?? 0),
+      slPx:       slPxOanda,
+      tpPx:       tpPxOanda,
+      slUsd:      isHistory ? 0 : slUsdOanda,
+      tpUsd:      isHistory ? 0 : tpUsdOanda,
       riskAmt:    isHistory ? Math.abs(financing + commission) : margin,
-      riskLabel:  isHistory ? "Fees & Fin." : "Margin",
+      riskLabel:  isHistory ? "Fees & Fin." : "Risk Capital",
       conflTitle: rawUnits > 0 ? "SMC Bullish Order Block" : "SMC Bearish Order Block",
       conflSub:   rawUnits > 0
         ? "Demand Zone · Above 200 EMA · CHoCH confirmed"
@@ -1216,6 +1264,10 @@ function normalizeTrade(t, isCrypto, kind) {
   const tpPx      = parseFloat(t.takeProfit      ?? 0);
   const openMs    = parseInt(t.createdTime        ?? t.openTime         ?? 0);
 
+  const posIM   = parseFloat(t.positionIM ?? 0);
+  const slUsd   = parseFloat(t.slAmountUSD ?? 0);
+  const tpUsd   = parseFloat(t.tpAmountUSD ?? 0);
+
   return {
     instrument: sym,
     isLong,
@@ -1226,8 +1278,10 @@ function normalizeTrade(t, isCrypto, kind) {
     closePx:    0,
     slPx,
     tpPx,
-    riskAmt:    posVal,
-    riskLabel:  "Pos. Value",
+    slUsd,
+    tpUsd,
+    riskAmt:    posIM > 0 ? posIM : posVal,
+    riskLabel:  "Risk Capital",
     conflTitle: isLong ? "Bybit Long Position" : "Bybit Short Position",
     conflSub:   sym + (isLong ? " · Long · Live" : " · Short · Live"),
     openDt:     openMs > 0 ? new Date(openMs) : null,
@@ -1248,7 +1302,7 @@ function TradeDetailCard({ trade: t, kind, isCrypto = false }) {
 
   const {
     instrument, isLong, units, pnl, pnlLabel,
-    entryPx, closePx, slPx, tpPx, riskAmt, riskLabel,
+    entryPx, closePx, slPx, tpPx, slUsd, tpUsd, riskAmt, riskLabel,
     conflTitle, conflSub, openDt, closeDt, id,
   } = norm;
 
@@ -1399,37 +1453,64 @@ function TradeDetailCard({ trade: t, kind, isCrypto = false }) {
         ))}
       </div>
 
-      {/* ── 4. EXECUTION — SL · TP · Close/Live ─────────────────────────── */}
+      {/* ── 4. EXECUTION — SL $ · TP $ · Close/Live ───────────────────────── */}
+      {/* Open trades: SL/TP show dollar risk/reward with price as sub-label.  */}
+      {/* History:     shows close price + realized P&L.                        */}
       <div style={{
         display: "grid", gridTemplateColumns: "1fr 1fr 1fr",
         borderBottom: `1px solid ${C.cardBdr}`,
       }}>
-        {[
-          { label: "Stop Loss",   value: fmt(slPx),              color: slPx > 0 ? C.red   : C.sub, icon: "🛑" },
-          { label: "Take Profit", value: tpPx > 0 ? fmt(tpPx) : "—", color: tpPx > 0 ? C.green : C.sub, icon: "🎯" },
-          isHistory
-            ? { label: "Close",    value: fmt(closePx),           color: C.label,   icon: "⤴" }
-            : { label: "Live P&L", value: `${pnlSign}${pnl.toFixed(2)}`, color: pnlColor, icon: "〜" },
-        ].map(({ label, value, color, icon }, idx) => (
-          <div key={label} style={{
-            padding: "7px 6px", textAlign: "center",
-            borderRight: idx < 2 ? `1px solid ${C.cardBdr}` : "none",
-          }}>
-            <p style={{
-              color: C.sub, fontSize: "0.5rem", letterSpacing: "0.08em",
-              textTransform: "uppercase", margin: "0 0 3px", fontFamily: FONT_UI,
-            }}>
-              {icon} {label}
+        {/* SL cell */}
+        <div style={{ padding: "7px 6px", textAlign: "center", borderRight: `1px solid ${C.cardBdr}` }}>
+          <p style={{ color: C.sub, fontSize: "0.5rem", letterSpacing: "0.08em", textTransform: "uppercase", margin: "0 0 3px", fontFamily: FONT_UI }}>
+            🛑 {isHistory ? "Stop Loss" : "SL Risk"}
+          </p>
+          {!isHistory && slUsd > 0 ? (
+            <>
+              <p style={{ color: C.red, fontSize: "0.75rem", fontWeight: 700, fontFamily: FONT_MONO, margin: 0, textShadow: `0 0 6px ${C.red}40` }}>
+                -${slUsd.toFixed(2)}
+              </p>
+              {slPx > 0 && (
+                <p style={{ color: C.sub, fontSize: "0.52rem", fontFamily: FONT_MONO, margin: "2px 0 0" }}>{fmt(slPx)}</p>
+              )}
+            </>
+          ) : (
+            <p style={{ color: slPx > 0 ? C.red : C.sub, fontSize: "0.75rem", fontWeight: 700, fontFamily: FONT_MONO, margin: 0 }}>
+              {fmt(slPx)}
             </p>
-            <p style={{
-              color, fontSize: "0.75rem", fontWeight: 700,
-              fontFamily: FONT_MONO, margin: 0,
-              textShadow: color !== C.label && color !== C.sub ? `0 0 6px ${color}40` : "none",
-            }}>
-              {value}
+          )}
+        </div>
+
+        {/* TP cell */}
+        <div style={{ padding: "7px 6px", textAlign: "center", borderRight: `1px solid ${C.cardBdr}` }}>
+          <p style={{ color: C.sub, fontSize: "0.5rem", letterSpacing: "0.08em", textTransform: "uppercase", margin: "0 0 3px", fontFamily: FONT_UI }}>
+            🎯 {isHistory ? "Take Profit" : "TP Reward"}
+          </p>
+          {!isHistory && tpUsd > 0 ? (
+            <>
+              <p style={{ color: C.green, fontSize: "0.75rem", fontWeight: 700, fontFamily: FONT_MONO, margin: 0, textShadow: `0 0 6px ${C.green}40` }}>
+                +${tpUsd.toFixed(2)}
+              </p>
+              {tpPx > 0 && (
+                <p style={{ color: C.sub, fontSize: "0.52rem", fontFamily: FONT_MONO, margin: "2px 0 0" }}>{fmt(tpPx)}</p>
+              )}
+            </>
+          ) : (
+            <p style={{ color: tpPx > 0 ? C.green : C.sub, fontSize: "0.75rem", fontWeight: 700, fontFamily: FONT_MONO, margin: 0 }}>
+              {tpPx > 0 ? fmt(tpPx) : "—"}
             </p>
-          </div>
-        ))}
+          )}
+        </div>
+
+        {/* Close / Live P&L cell */}
+        <div style={{ padding: "7px 6px", textAlign: "center" }}>
+          <p style={{ color: C.sub, fontSize: "0.5rem", letterSpacing: "0.08em", textTransform: "uppercase", margin: "0 0 3px", fontFamily: FONT_UI }}>
+            {isHistory ? "⤴ Close" : "〜 Live P&L"}
+          </p>
+          <p style={{ color: isHistory ? C.label : pnlColor, fontSize: "0.75rem", fontWeight: 700, fontFamily: FONT_MONO, margin: 0, textShadow: !isHistory ? `0 0 6px ${pnlColor}40` : "none" }}>
+            {isHistory ? fmt(closePx) : `${pnlSign}${pnl.toFixed(2)}`}
+          </p>
+        </div>
       </div>
 
       {/* ── 5. TIMESTAMPS ────────────────────────────────────────────────── */}

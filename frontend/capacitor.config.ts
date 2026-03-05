@@ -4,11 +4,11 @@ const config: CapacitorConfig = {
   appId:   "com.fxradiant.app",
   appName: "FX Radiant",
   webDir:  "dist",
-  server:  {
+  // server:  {
     androidScheme: "https",
     // Live reload during development — point to the Mac's LAN IP.
     // Remove or comment these two lines for a production build.
-    url: "http://192.168.0.157:5173",
+    // url: "http://192.168.0.157:5173",
     cleartext: true,
   },
   plugins: {

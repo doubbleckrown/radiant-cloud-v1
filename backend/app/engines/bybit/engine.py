@@ -150,6 +150,7 @@ async def bybit_refresh_loop() -> None:
                                 "layer2":    signal.layer2_zone,
                                 "layer3":    signal.layer3_mss,
                                 "timestamp": signal.timestamp,
+                                "pd_zone":   signal.pd_zone,
                                 "exec_status": None,
                             }
                             state.bybit_signal_history[sym] = ([sig_dict] + state.bybit_signal_history[sym])[:50]

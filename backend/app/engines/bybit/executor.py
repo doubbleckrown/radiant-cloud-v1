@@ -178,8 +178,37 @@ async def fetch_positions(api_key: str, api_secret: str) -> list:
             r.raise_for_status()
         data = r.json()
         raise_on_error(data, "fetch_positions")
-        return [p for p in data.get("result", {}).get("list", [])
-                if float(p.get("size", 0) or 0) > 0]
+        raw = [p for p in data.get("result", {}).get("list", [])
+               if float(p.get("size", 0) or 0) > 0]
+
+        # Augment each position with pre-computed dollar amounts for the UI
+        enriched = []
+        for p in raw:
+            size      = abs(float(p.get("size",        0) or 0))
+            avg_price = abs(float(p.get("avgPrice",    0) or p.get("entryPrice", 0) or 0))
+            sl_px     = abs(float(p.get("stopLoss",    0) or 0))
+            tp_px     = abs(float(p.get("takeProfit",  0) or 0))
+
+            # Initial margin — Bybit V5 returns positionIM directly.
+            # Fallback: positionValue / leverage for older API versions.
+            pos_im  = float(p.get("positionIM", 0) or 0)
+            if pos_im <= 0:
+                pos_val  = float(p.get("positionValue", 0) or 0)
+                leverage = float(p.get("leverage", 20)     or 20)
+                pos_im   = round(pos_val / leverage, 4) if leverage > 0 else 0.0
+
+            # For Bybit linear USDT perps the P&L per unit = $1 per $1 price move
+            # so dollar risk = |entry - sl| * qty  (no pip conversion needed)
+            sl_usd = round(abs(avg_price - sl_px) * size, 4) if sl_px and avg_price else 0.0
+            tp_usd = round(abs(tp_px - avg_price) * size, 4) if tp_px and avg_price else 0.0
+
+            enriched.append({
+                **p,
+                "positionIM":   round(pos_im,  4),
+                "slAmountUSD":  sl_usd,
+                "tpAmountUSD":  tp_usd,
+            })
+        return enriched
     except httpx.TimeoutException as e:
         logger.warning("fetch_positions timeout — returning []: %s", e)
         return []

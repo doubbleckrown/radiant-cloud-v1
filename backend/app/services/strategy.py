@@ -93,6 +93,9 @@ class ConfirmationState:
     layer2_zone:   Optional[OrderBlock | FairValueGap] = None
     layer3_mss:    bool = False
     direction:     Optional[SignalDirection] = None
+    # Premium / Discount Zone (ICT concept — added as a structural pre-filter)
+    pd_zone:       str  = "UNKNOWN"   # "PREMIUM" | "DISCOUNT" | "EQUILIBRIUM" | "UNKNOWN"
+    pd_aligned:    bool = False        # True when direction matches the zone
 
     @property
     def confidence(self) -> int:
@@ -124,6 +127,7 @@ class TradeSignal:
     layer2_zone_obj:  object # raw OB or FVG object — used by sl_tp.py for zone anchor
     layer3_mss:       bool
     timestamp:        int
+    pd_zone:          str = ""  # "PREMIUM" | "DISCOUNT" | "EQUILIBRIUM" (ICT P/D filter)
 
     @property
     def risk_reward(self) -> float:
@@ -406,6 +410,62 @@ def calculate_take_profit(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+#  Premium / Discount Zone classifier  (ICT structural filter)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def classify_premium_discount(
+    candles:      list[Candle],
+    current_price: float,
+    lookback:     int   = 50,
+    eq_band_pct:  float = 0.025,  # ±2.5 % of range around midpoint = equilibrium
+) -> tuple[str, float, float, float]:
+    """
+    Classify where the current price sits within the recent price range.
+
+    ICT / Smart Money Concepts:
+        Discount zone  (<50 %) — institutional LONG territory (buy low)
+        Premium  zone  (>50 %) — institutional SHORT territory (sell high)
+        Equilibrium    (≈50 %) — neutral / uncertain, tight band around midpoint
+
+    Parameters
+    ----------
+    candles       : Recent candles (H1 or equivalent), oldest-first.
+    current_price : Live bid-ask mid or mark price.
+    lookback      : Number of candles used to define the range (default 50 H1 ≈ 2 days).
+    eq_band_pct   : Half-width of the equilibrium band as a fraction of the
+                    total range (default 2.5 %). Trade signals in equilibrium
+                    are allowed but labelled accordingly.
+
+    Returns
+    -------
+    (zone, swing_high, swing_low, midpoint)
+        zone ∈ {"PREMIUM", "DISCOUNT", "EQUILIBRIUM", "UNKNOWN"}
+    """
+    if len(candles) < 2:
+        return "UNKNOWN", current_price, current_price, current_price
+
+    recent     = candles[-lookback:]
+    swing_high = max(c.high for c in recent)
+    swing_low  = min(c.low  for c in recent)
+    total_rng  = swing_high - swing_low
+
+    if total_rng <= 0:
+        return "EQUILIBRIUM", swing_high, swing_low, swing_high
+
+    midpoint = (swing_high + swing_low) / 2.0
+    band     = total_rng * eq_band_pct
+
+    if current_price > midpoint + band:
+        zone = "PREMIUM"
+    elif current_price < midpoint - band:
+        zone = "DISCOUNT"
+    else:
+        zone = "EQUILIBRIUM"
+
+    return zone, swing_high, swing_low, midpoint
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 #  Master Confluence Engine
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -445,6 +505,28 @@ class SMCConfluenceEngine:
         state.layer1_bias = layer1_trend_bias(candles, self.ema_period, self.hysteresis)
         if state.layer1_bias == Bias.NEUTRAL:
             return None  # No trade in ranging market
+
+        # ── Premium / Discount Zone filter (ICT structural filter) ──────────
+        # Must establish direction from Layer 1 bias before the check.
+        direction_l1 = (
+            SignalDirection.LONG
+            if state.layer1_bias == Bias.BULLISH
+            else SignalDirection.SHORT
+        )
+        pd_zone, _sh, _sl, _mp = classify_premium_discount(candles, current_price)
+        state.pd_zone = pd_zone
+        # LONG signals are only valid in Discount (price is cheap — institutions buy).
+        # SHORT signals are only valid in Premium (price is expensive — institutions sell).
+        # Equilibrium allows both but is the least-conviction scenario.
+        pd_aligned = (
+            (direction_l1 == SignalDirection.LONG  and pd_zone in ("DISCOUNT",    "EQUILIBRIUM")) or
+            (direction_l1 == SignalDirection.SHORT and pd_zone in ("PREMIUM",     "EQUILIBRIUM"))
+        )
+        state.pd_aligned = pd_aligned
+        if not pd_aligned:
+            # e.g. BULLISH EMA bias but price is already in Premium →
+            # entering a LONG here is chasing — very high failure rate.
+            return None
 
         # ── Layer 2 ──────────────────────────────────────────────────────────
         state.layer2_active, state.layer2_zone = layer2_value_zone(
@@ -492,6 +574,7 @@ class SMCConfluenceEngine:
             layer2_zone_obj=state.layer2_zone,   # raw OB/FVG → zone-anchor in sl_tp.py
             layer3_mss=state.layer3_mss,
             timestamp=timestamp,
+            pd_zone=state.pd_zone,               # "DISCOUNT" for LONGs, "PREMIUM" for SHORTs
         )
 
     def get_partial_state(
@@ -502,7 +585,19 @@ class SMCConfluenceEngine:
         """Return current confluence state even if not fully confirmed (for UI display)."""
         state = ConfirmationState()
         state.layer1_bias = layer1_trend_bias(candles, self.ema_period, self.hysteresis)
+        # Always classify P/D zone regardless of bias (useful for UI even when NEUTRAL)
+        pd_zone, _, _, _ = classify_premium_discount(candles, current_price)
+        state.pd_zone = pd_zone
         if state.layer1_bias != Bias.NEUTRAL:
+            direction_l1 = (
+                SignalDirection.LONG
+                if state.layer1_bias == Bias.BULLISH
+                else SignalDirection.SHORT
+            )
+            state.pd_aligned = (
+                (direction_l1 == SignalDirection.LONG  and pd_zone in ("DISCOUNT",    "EQUILIBRIUM")) or
+                (direction_l1 == SignalDirection.SHORT and pd_zone in ("PREMIUM",     "EQUILIBRIUM"))
+            )
             state.layer2_active, state.layer2_zone = layer2_value_zone(
                 current_price, candles, state.layer1_bias
             )

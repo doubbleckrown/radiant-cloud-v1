@@ -144,6 +144,7 @@ async def candle_refresh_loop() -> None:
                                 "layer2":    signal.layer2_zone,
                                 "layer3":    signal.layer3_mss,
                                 "timestamp": signal.timestamp,
+                                "pd_zone":   signal.pd_zone,
                                 "exec_status": None,
                             }
                             state.signal_history[ins] = ([sig_dict] + state.signal_history[ins])[:50]

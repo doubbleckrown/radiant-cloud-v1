@@ -8,6 +8,7 @@ place_market_order() additionally coerces units to str(int(units)) before
 the request body is built — belt-and-suspenders against any float path.
 """
 from __future__ import annotations
+from typing import Optional
 import logging
 from datetime import datetime
 
@@ -72,6 +73,9 @@ async def fetch_open_trades(api_key: str, account_id: str) -> list:
         r.raise_for_status()
     trades = r.json().get("trades", [])
 
+    # Lazy import to avoid circular dependency (sl_tp imports strategy, not executor)
+    from app.engines.sl_tp import _pip_value_usd, _get_class as _sltp_class
+
     # Aggregate all trades per instrument into a net position
     agg: dict[str, dict] = {}
     for t in trades:
@@ -82,44 +86,74 @@ async def fetch_open_trades(api_key: str, account_id: str) -> list:
         trade_id   = t.get("id", "")
         open_time  = t.get("openTime", "")
         margin     = float(t.get("marginUsed", 0) or 0)
+        # SL/TP prices from the attached order objects on each individual trade
+        sl_price   = float((t.get("stopLossOrder")   or {}).get("price", 0) or 0)
+        tp_price   = float((t.get("takeProfitOrder") or {}).get("price", 0) or 0)
 
         if ins not in agg:
             agg[ins] = {
-                "instrument":  ins,
+                "instrument":   ins,
                 "currentUnits": units,
                 "unrealizedPL": upl,
                 # Weighted average entry price (weight = abs units)
-                "_price_num":  abs(units) * price,
-                "_price_den":  abs(units),
-                "openTime":    open_time,
-                "marginUsed":  margin,
+                "_price_num":   abs(units) * price,
+                "_price_den":   abs(units),
+                "openTime":     open_time,
+                "marginUsed":   margin,
+                # SL/TP taken from the most-recent trade (set by our bot, same for all fills)
+                "stopLossPrice":   sl_price,
+                "takeProfitPrice": tp_price,
                 # Most recent trade ID used as the primary id for the card.
                 # tradeIds lists ALL IDs so the close route can close all of them.
-                "id":          trade_id,
-                "tradeIds":    [trade_id] if trade_id else [],
+                "id":       trade_id,
+                "tradeIds": [trade_id] if trade_id else [],
             }
         else:
             a = agg[ins]
             a["currentUnits"] += units
-            a["unrealizedPL"] = round(a["unrealizedPL"] + upl, 5)
+            a["unrealizedPL"]  = round(a["unrealizedPL"] + upl, 5)
             a["_price_num"]   += abs(units) * price
             a["_price_den"]   += abs(units)
             a["marginUsed"]    = round(a["marginUsed"] + margin, 5)
             # Keep earliest openTime
             if open_time and open_time < a["openTime"]:
                 a["openTime"] = open_time
-            # Advance the primary id to the most recent trade
+            # Advance the primary id + SL/TP to the most recent trade
             if trade_id and int(trade_id) > int(a["id"] or 0):
                 a["id"] = trade_id
+                if sl_price: a["stopLossPrice"]   = sl_price
+                if tp_price: a["takeProfitPrice"] = tp_price
             if trade_id:
                 a["tradeIds"].append(trade_id)
 
-    # Finalise: compute weighted average price, clean up working keys
+    # Finalise: compute weighted average price, dollar amounts, clean up working keys
     positions = []
     for ins, a in agg.items():
-        a["price"] = round(a["_price_num"] / a["_price_den"], 5) if a["_price_den"] else 0.0
+        entry  = round(a["_price_num"] / a["_price_den"], 5) if a["_price_den"] else 0.0
+        a["price"] = entry
         del a["_price_num"]
         del a["_price_den"]
+
+        # ── Dollar amounts for the UI ─────────────────────────────────────────
+        # Uses the same pip-value logic as oanda_units() so the figures are
+        # consistent with how the bot sized the position.
+        abs_units = abs(a["currentUnits"])
+        sl_px     = a.get("stopLossPrice",   0.0)
+        tp_px     = a.get("takeProfitPrice", 0.0)
+        try:
+            cfg      = _sltp_class(ins, is_bybit=False)
+            pip_sz   = cfg.pip_size
+            pip_val  = _pip_value_usd(ins, entry) if entry > 0 else 0.0
+            if pip_sz > 0 and pip_val > 0 and entry > 0:
+                sl_usd = round(abs(entry - sl_px) / pip_sz * pip_val * abs_units, 2) if sl_px else 0.0
+                tp_usd = round(abs(tp_px - entry) / pip_sz * pip_val * abs_units, 2) if tp_px else 0.0
+            else:
+                sl_usd = tp_usd = 0.0
+        except Exception:
+            sl_usd = tp_usd = 0.0
+        a["slAmountUSD"] = sl_usd
+        a["tpAmountUSD"] = tp_usd
+
         positions.append(a)
 
     return positions
@@ -129,7 +163,7 @@ async def fetch_trade_history(
     api_key:    str,
     account_id: str,
     count:      int = 500,       # Oanda V20 max per page is 500
-    before_id:  str | None = None,
+    before_id:  Optional[str] = None,
     fetch_all:  bool = True,     # paginate through all pages by default
     max_total:  int = 2000,      # safety cap — stops pagination at this total
 ) -> list:

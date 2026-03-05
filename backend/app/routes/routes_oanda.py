@@ -118,7 +118,7 @@ async def get_open_trades(_: dict = Depends(get_current_user)):
 @router.get("/account/history")
 async def get_trade_history(
     count:     int          = 500,
-    before_id: str | None   = None,
+    before_id: Optional[str]  = None,
     fetch_all: bool         = True,
     _:         dict         = Depends(get_current_user),
 ):
