@@ -16,10 +16,9 @@
  */
 import { useState, useCallback, useEffect } from "react";
 import { motion, AnimatePresence }            from "framer-motion";
-import api                                    from "../utils/api";
 import { useAuthStore }                       from "../store/authStore";
 import { useTheme }                           from "../hooks/useTheme";
-import { useUser, useClerk }                  from "@clerk/clerk-react";
+import { useUser, useClerk, useAuth }         from "@clerk/clerk-react";
 
 // ── Static colour tokens (not mode-dependent) ─────────────────────────────────
 const C = {
@@ -83,8 +82,11 @@ function ensureRangeStyles() {
 export default function ProfilePage() {
   const { user: clerkUser } = useUser();
   const { signOut }         = useClerk();
-  // Private Bot Mode: authStore only exposes appMode — no credentials or settings
-  const { toggleAppMode }   = useAuthStore();
+  const {
+    oanda_risk_pct, bybit_risk_pct,
+    fetchProfile, updateOandaRisk, updateBybitRisk,
+  } = useAuthStore();
+  const { getToken } = useAuth();
   const { isCrypto, accent, accentDim, accentBdr } = useTheme();
 
   // Ensure range-thumb CSS is injected once
@@ -95,78 +97,30 @@ export default function ProfilePage() {
     : (clerkUser?.username ?? "Trader");
 
   const user = {
-    name:  displayName,
-    email: clerkUser?.primaryEmailAddress?.emailAddress ?? "",
+    name:           displayName,
+    email:          clerkUser?.primaryEmailAddress?.emailAddress ?? "",
+    oanda_risk_pct: oanda_risk_pct ?? 1.0,
+    bybit_risk_pct: bybit_risk_pct ?? 20.0,
   };
 
+  // Fetch profile from backend once on mount
+  useEffect(() => {
+    getToken().then(token => fetchProfile(token)).catch(() => {});
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   // ── Editing state ─────────────────────────────────────────────────────────
-  const [editing,   setEditing]   = useState(null);
-  const [draftName, setDraftName] = useState("");
-  // Risk slider — live synced to backend via POST /api/settings/update
-  // ── Dual independent risk sliders (Oanda + Bybit) ───────────────────────
-  const [oandaRisk,      setOandaRisk]      = useState(10.0);
-  const [bybitRisk,      setBybitRisk]      = useState(10.0);
-  const [botEnabled,     setBotEnabled]     = useState(true);
-  const [ttlMinutes,     setTtlMinutes]     = useState(120);
-  const [riskSyncing,    setRiskSyncing]    = useState(false);
-  const [riskSynced,     setRiskSynced]     = useState(false);
-  const [riskError,      setRiskError]      = useState(null);
-  // Keep legacy draftRisk for compat with existing components
-  const draftRisk    = isCrypto ? bybitRisk   : oandaRisk;
-  const setDraftRisk = isCrypto ? setBybitRisk : setOandaRisk;
-  const [saving,    setSaving]    = useState(null);
-  const [saveError, setSaveError] = useState(null);
-
-  // ── Load authoritative profile from GET /api/profile (Clerk-linked) ──────
-  const [riskInitialised, setRiskInitialised] = useState(false);
-
-  useEffect(() => {
-    api.get("/profile")
-      .then(({ data }) => {
-        if (data?.oanda_risk_pct != null) setOandaRisk(parseFloat(data.oanda_risk_pct));
-        if (data?.bybit_risk_pct != null) setBybitRisk(parseFloat(data.bybit_risk_pct));
-        if (data?.bot_enabled    != null) setBotEnabled(Boolean(data.bot_enabled));
-        if (data?.ttl_minutes    != null) setTtlMinutes(parseInt(data.ttl_minutes));
-      })
-      .catch(() => {
-        // Fallback: legacy /settings endpoint
-        api.get("/settings").then(({ data }) => {
-          if (data?.risk_pct != null) {
-            setOandaRisk(parseFloat(data.risk_pct));
-            setBybitRisk(parseFloat(data.risk_pct));
-          }
-        }).catch(() => {});
-      })
-      .finally(() => setRiskInitialised(true));
-  }, []);  // once on mount — profile is Clerk-scoped server-side
-
-  // ── Debounced profile sync — fires 800ms after any risk/bot change ───────
-  useEffect(() => {
-    if (!riskInitialised) return;
-    const t = setTimeout(async () => {
-      setRiskSyncing(true);
-      setRiskError(null);
-      try {
-        await api.post("/profile/update", {
-          oanda_risk_pct: parseFloat(oandaRisk),
-          bybit_risk_pct: parseFloat(bybitRisk),
-          bot_enabled:    botEnabled,
-          ttl_minutes:    ttlMinutes,
-        });
-        setRiskSynced(true);
-        setTimeout(() => setRiskSynced(false), 2000);
-      } catch {
-        setRiskError("Sync failed — check connection");
-      } finally {
-        setRiskSyncing(false);
-      }
-    }, 800);
-    return () => clearTimeout(t);
-  }, [oandaRisk, bybitRisk, botEnabled, ttlMinutes, riskInitialised]);
+  const [editing,        setEditing]        = useState(null);
+  const [draftName,      setDraftName]      = useState("");
+  const [draftOandaRisk, setDraftOandaRisk] = useState(1.0);
+  const [draftBybitRisk, setDraftBybitRisk] = useState(20.0);
+  const [saving,         setSaving]         = useState(null);
+  const [saveError,      setSaveError]      = useState(null);
 
   const openEdit = useCallback((field) => {
     setSaveError(null);
-    if (field === "name") setDraftName(user.name);
+    if (field === "name")       setDraftName(user.name);
+    if (field === "oanda_risk") setDraftOandaRisk(user.oanda_risk_pct);
+    if (field === "bybit_risk") setDraftBybitRisk(user.bybit_risk_pct);
     setEditing(field);
   }, [user]);
 
@@ -176,18 +130,19 @@ export default function ProfilePage() {
   }, []);
 
   const commit = useCallback(async (field) => {
-    if (field === "risk") { setEditing(null); return; } // risk auto-syncs via useEffect
     setSaving(field);
     setSaveError(null);
     try {
-      // Only name edit supported via Clerk — no backend settings call needed for name
+      const token = await getToken();
+      if (field === "oanda_risk") await updateOandaRisk(draftOandaRisk, token);
+      if (field === "bybit_risk") await updateBybitRisk(draftBybitRisk, token);
       setEditing(null);
     } catch (err) {
       setSaveError(err?.response?.data?.detail ?? "Save failed — try again");
     } finally {
       setSaving(null);
     }
-  }, []);
+  }, [draftOandaRisk, draftBybitRisk, getToken, updateOandaRisk, updateBybitRisk]);
 
   return (
     <div style={{ fontFamily: FONT_UI, color: C.white, minHeight: "100%" }}>
@@ -311,91 +266,112 @@ export default function ProfilePage() {
           <StaticRow icon="📧" label="Email" value={user.email || "—"} />
         </Section>
 
-        {/* ── Bot Status (replaces credential forms in Private Bot Mode) ──── */}
-        <BotStatusSection isCrypto={isCrypto} accent={accent} accentDim={accentDim} accentBdr={accentBdr} />
+        {/* ── Credentials note — Private Bot Mode ────────────────────────── */}
+        {/* In Private Bot Mode all credentials live in the server .env.    */}
+        {/* No per-user key entry is needed or shown.                        */}
+        <Section label={isCrypto ? "Bybit Connection" : "Oanda Connection"}>
+          <StaticRow
+            icon="🔗"
+            label="Connection Mode"
+            value="Private Bot"
+            sub="Credentials managed server-side via .env — no key entry required"
+          />
+          <StaticRow
+            icon={isCrypto ? "₿" : "📈"}
+            label={isCrypto ? "Exchange" : "Broker"}
+            value={isCrypto ? "Bybit Perpetuals" : "Oanda v20"}
+            sub={isCrypto ? "Linear USDT · 20× max leverage" : "Forex · Metals · Indices"}
+          />
+        </Section>
 
-        {/* ── Section 3: Risk — dual independent sliders ───────────────────── */}
-        <Section label="Risk">
-          {/* Sync status row */}
-          <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 6, minHeight: 16 }}>
-            {riskSyncing && <span style={{ fontSize: "0.6rem", color: C.sub }}>syncing…</span>}
-            {riskSynced && !riskSyncing && <span style={{ fontSize: "0.6rem", color: "#00FF41" }}>✓ saved</span>}
-            {riskError  && <span style={{ fontSize: "0.6rem", color: C.red }}>{riskError}</span>}
-          </div>
+        {/* ── Section 2: Risk Configuration — mode-aware ──────────────────── */}
+        {/* FOREX mode shows only Oanda risk; CRYPTO mode shows only Bybit risk. */}
+        <AnimatePresence mode="wait">
+          {isCrypto ? (
+            <motion.div
+              key="bybit-risk"
+              initial={{ opacity: 0, y: 6 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -6 }}
+              transition={{ duration: 0.22 }}
+            >
+              <Section label="Bybit Risk Configuration">
+                <EditableRow
+                  icon="📊"
+                  label="Bybit Risk % Per Trade"
+                  value={`${user.bybit_risk_pct.toFixed(0)}%`}
+                  valueSub={bybitRiskLabel(user.bybit_risk_pct)}
+                  isEditing={editing === "bybit_risk"}
+                  isSaving={saving === "bybit_risk"}
+                  onEdit={() => openEdit("bybit_risk")}
+                  onCancel={cancelEdit}
+                  onSave={() => commit("bybit_risk")}
+                >
+                  <BybitRiskSlider value={draftBybitRisk} onChange={setDraftBybitRisk} />
+                </EditableRow>
+                <StaticRow icon="⚖️" label="Risk / Reward Ratio" value="1 : 3" sub="Fixed by SMC engine" />
+                <StaticRow
+                  icon="ℹ️" label="Why 20%?"
+                  value="Small capital sizing"
+                  sub="Crypto accounts are typically $200–$500. Higher % is needed to clear exchange minimums."
+                />
+              </Section>
+            </motion.div>
+          ) : (
+            <motion.div
+              key="oanda-risk"
+              initial={{ opacity: 0, y: 6 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -6 }}
+              transition={{ duration: 0.22 }}
+            >
+              <Section label="Oanda Risk Configuration">
+                <EditableRow
+                  icon="📊"
+                  label="Oanda Risk % Per Trade"
+                  value={`${user.oanda_risk_pct.toFixed(1)}%`}
+                  valueSub={oandaRiskLabel(user.oanda_risk_pct)}
+                  isEditing={editing === "oanda_risk"}
+                  isSaving={saving === "oanda_risk"}
+                  onEdit={() => openEdit("oanda_risk")}
+                  onCancel={cancelEdit}
+                  onSave={() => commit("oanda_risk")}
+                >
+                  <OandaRiskSlider value={draftOandaRisk} onChange={setDraftOandaRisk} />
+                </EditableRow>
+                <StaticRow icon="⚖️" label="Risk / Reward Ratio" value="1 : 3" sub="Fixed by SMC engine" />
+                <StaticRow
+                  icon="ℹ️" label="Why 1%?"
+                  value="Industry standard"
+                  sub="A $10,000 Oanda account risks $100 per signal. Preserves capital across losing streaks."
+                />
+              </Section>
+            </motion.div>
+          )}
+        </AnimatePresence>
 
-          {/* Oanda risk slider */}
-          <div style={{ padding: "4px 0 14px" }}>
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
-              <div>
-                <p style={{ color: C.white, fontSize: "0.82rem", fontWeight: 600, margin: 0 }}>
-                  Oanda Risk Per Trade
-                </p>
-                <p style={{ color: C.sub, fontSize: "0.68rem", margin: "2px 0 0" }}>
-                  Forex · Metals · Indices auto-execution
-                </p>
-              </div>
-              <span style={{ fontFamily: FONT_MONO, fontSize: "1.05rem", fontWeight: 700, color: "#00C2FF",
-                             textShadow: "0 0 10px #00C2FF80" }}>
-                {parseFloat(oandaRisk).toFixed(1)}%
-              </span>
-            </div>
-            <RiskSlider value={oandaRisk} onChange={setOandaRisk} accent="#00C2FF" />
-          </div>
-
-          {/* Bybit risk slider */}
-          <div style={{ padding: "4px 0 14px", borderTop: `1px solid ${C.cardBdr}` }}>
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10, marginTop: 14 }}>
-              <div>
-                <p style={{ color: C.white, fontSize: "0.82rem", fontWeight: 600, margin: 0 }}>
-                  Bybit Risk Per Trade
-                </p>
-                <p style={{ color: C.sub, fontSize: "0.68rem", margin: "2px 0 0" }}>
-                  Perpetuals · 20× Isolated auto-execution
-                </p>
-              </div>
-              <span style={{ fontFamily: FONT_MONO, fontSize: "1.05rem", fontWeight: 700, color: "#FFA500",
-                             textShadow: "0 0 10px #FFA50080" }}>
-                {parseFloat(bybitRisk).toFixed(1)}%
-              </span>
-            </div>
-            <RiskSlider value={bybitRisk} onChange={setBybitRisk} accent="#FFA500" />
-          </div>
-
-          {/* Bot TTL */}
-          <div style={{ padding: "4px 0", borderTop: `1px solid ${C.cardBdr}` }}>
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 14, marginBottom: 8 }}>
-              <div>
-                <p style={{ color: C.white, fontSize: "0.82rem", fontWeight: 600, margin: 0 }}>Signal TTL</p>
-                <p style={{ color: C.sub, fontSize: "0.68rem", margin: "2px 0 0" }}>Force-close if not hit in N minutes</p>
-              </div>
-              <span style={{ fontFamily: FONT_MONO, fontSize: "1.05rem", fontWeight: 700, color: accent }}>
-                {ttlMinutes}m
-              </span>
-            </div>
-            <input type="range" min={15} max={480} step={15} value={ttlMinutes}
-              onChange={e => setTtlMinutes(parseInt(e.target.value))}
-              style={{ width: "100%", accentColor: accent, cursor: "pointer" }} />
-            <p style={{ color: C.sub, fontSize: "0.63rem", marginTop: 6 }}>
-              Range: 15 min – 8 hours. Default 120 min (2 h).
-            </p>
-          </div>
+        {/* ── Section 3: Auto-Trade Status ─────────────────────────────────── */}
+        <Section label="Auto-Trade">
+          <StaticRow
+            icon="⚡"
+            label="Master Auto-Trade"
+            value="Active"
+            sub="Toggle from Account → Summary tab"
+          />
         </Section>
 
         {/* ── Section 4: Security ──────────────────────────────────────────── */}
         <Section label="Security">
-          <StaticRow icon="🔒" label="Authentication" value="Clerk" sub="RS256 JWT · industry standard" />
+          <StaticRow icon="🔒" label="Authentication" value="Clerk" sub="Managed identity · industry standard" />
           <StaticRow icon="📱" label="Session"        value="Active" sub="Managed by Clerk SSO" />
-          <StaticRow icon="🔑" label="Credentials"    value=".env only" sub="API keys never stored in database" />
-          <StaticRow icon="👤" label="Profile scope"  value="Per-user" sub="Vault keyed by Clerk user ID" />
         </Section>
 
         {/* ── Section 5: About ─────────────────────────────────────────────── */}
         <Section label="About">
-          <StaticRow icon="🧠" label="SMC Engine"        value="v4.0.0"  sub="3-layer confluence · both engines" />
-          <StaticRow icon="📈" label="Oanda Instruments" value="16"       sub="10 Forex · 3 Metals · 3 Indices" />
-          <StaticRow icon="₿"  label="Bybit Symbols"     value="19"       sub="14 Blue-chips · 5 Meme coins" />
-          <StaticRow icon="⏱"  label="Signal TTL"        value={`${ttlMinutes}m`} sub="Auto-expires if TP/SL not hit" />
-          <StaticRow icon="🔄" label="Candle Refresh"    value="60 s"     sub="H1 · M15 · M5 · M1 per instrument" />
+          <StaticRow icon="🧠" label="SMC Engine"     value="v1.0.0"  sub="3-layer confluence analysis" />
+          <StaticRow icon="📈" label="Instruments"    value={isCrypto ? "15 Perpetuals" : "15"} sub={isCrypto ? "Bybit Linear · Top volume" : "Forex · Metals · Indices · Crypto"} />
+          <StaticRow icon="⏱"  label="Signal TTL"     value="2 hours" sub="Auto-expires if TP/SL not hit" />
+          <StaticRow icon="🔄" label="Candle Refresh" value="60 s"    sub="H1 · M15 · M5 · M1 per instrument" />
         </Section>
 
         {/* ── Sign Out ─────────────────────────────────────────────────────── */}
@@ -420,100 +396,6 @@ export default function ProfilePage() {
 // ═════════════════════════════════════════════════════════════════════════════
 //  OandaCredentialsSection — FOREX mode credentials form
 // ═════════════════════════════════════════════════════════════════════════════
-// ─────────────────────────────────────────────────────────────────────────────
-//  BotStatusSection — Private Bot Mode
-// ─────────────────────────────────────────────────────────────────────────────
-function BotStatusSection({ isCrypto, accent }) {
-  const [status, setStatus] = useState(null);
-  const BYBIT_ORANGE = "#FFA500";
-  const engineColor  = isCrypto ? BYBIT_ORANGE : accent;
-
-  useEffect(() => {
-    import("../utils/api").then(({ default: api }) =>
-      api.get("/auth/me").then(({ data }) => setStatus(data)).catch(() => {})
-    );
-  }, []);
-
-  const rows = isCrypto ? [
-    {
-      icon: "₿", label: "Bybit API",
-      ok: status?.bybit_connected ?? false,
-      status: status == null ? "CHECKING…" : (status.bybit_connected ? "CONNECTED" : "NOT CONFIGURED"),
-      sub: status?.bybit_connected
-        ? `${status.bybit_symbols ?? 19} symbols · USDT Perpetuals · Linear`
-        : "Set BYBIT_API_KEY + BYBIT_API_SECRET in .env",
-    },
-    {
-      icon: "⚡", label: "Auto-Execute",
-      ok: status?.bybit_connected ?? false,
-      status: status?.bybit_connected ? "ARMED" : "OFFLINE",
-      sub: "Fires Bybit market orders at 100% SMC confluence · 20× Isolated",
-    },
-  ] : [
-    {
-      icon: "📈", label: "Oanda API",
-      ok: status?.oanda_connected ?? false,
-      status: status == null ? "CHECKING…" : (status.oanda_connected ? "CONNECTED" : "NOT CONFIGURED"),
-      sub: status?.oanda_connected
-        ? `${status.oanda_instruments ?? 16} instruments · v20 REST + WebSocket`
-        : "Set OANDA_API_KEY + OANDA_ACCOUNT_ID in .env",
-    },
-    {
-      icon: "⚡", label: "Auto-Execute",
-      ok: status?.oanda_connected ?? false,
-      status: status?.oanda_connected ? "ARMED" : "OFFLINE",
-      sub: "Fires Oanda market orders at 100% SMC confluence · Max Margin",
-    },
-  ];
-
-  return (
-    <div>
-      <p style={{
-        color: C.sub, fontSize: "0.6rem", fontWeight: 600,
-        letterSpacing: "0.12em", textTransform: "uppercase",
-        margin: "0 0 8px 4px",
-      }}>Bot Status</p>
-      <div style={{
-        borderRadius: 16, overflow: "hidden", background: C.card,
-        border: `1px solid rgba(${isCrypto ? "255,165,0" : "0,255,65"},0.2)`,
-      }}>
-        {rows.map((row, i) => (
-          <div key={row.label} style={{
-            display: "flex", alignItems: "center", gap: 14, padding: "14px 16px",
-            borderBottom: i < rows.length - 1 ? `1px solid ${C.cardBdr}` : "none",
-          }}>
-            <div style={{
-              width: 40, height: 40, borderRadius: 12, flexShrink: 0,
-              display: "flex", alignItems: "center", justifyContent: "center", fontSize: "1.1rem",
-              background: row.ok ? `${engineColor}10` : "rgba(255,255,255,0.04)",
-              border: `1px solid ${row.ok ? `${engineColor}30` : C.cardBdr}`,
-            }}>{row.icon}</div>
-            <div style={{ flex: 1 }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
-                <p style={{ color: C.white, fontSize: "0.88rem", fontWeight: 600, margin: 0 }}>{row.label}</p>
-                <span style={{
-                  fontSize: "0.55rem", fontWeight: 700, padding: "2px 7px", borderRadius: 5,
-                  background: row.ok ? `${engineColor}10` : "rgba(255,58,58,0.1)",
-                  border: `1px solid ${row.ok ? `${engineColor}28` : "rgba(255,58,58,0.25)"}`,
-                  color: row.ok ? engineColor : C.red, fontFamily: FONT_MONO, letterSpacing: "0.08em",
-                }}>{row.status}</span>
-              </div>
-              <p style={{ color: C.sub, fontSize: "0.67rem", margin: "3px 0 0" }}>{row.sub}</p>
-            </div>
-          </div>
-        ))}
-        <div style={{ padding: "12px 16px", borderTop: `1px solid ${C.cardBdr}`, background: "rgba(0,0,0,0.3)" }}>
-          <p style={{ color: C.sub, fontSize: "0.65rem", margin: 0, lineHeight: 1.6 }}>
-            🔐 Credentials are managed server-side via <span style={{ color: C.label, fontFamily: FONT_MONO, fontSize: "0.6rem" }}>.env</span>.
-            No API keys are stored in the browser.
-          </p>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-
 function OandaCredentialsSection({ keyHint, accountId, saveOandaCredentials }) {
   const { accent, accentDim, accentBdr } = useTheme();
   const [open,       setOpen]       = useState(false);
@@ -1066,308 +948,29 @@ function EditableRow({ icon, label, value, valueSub, isEditing, isSaving, onEdit
 
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  RiskSlider — uses var(--accent) for the fill and thumb so it follows mode.
-//  The CSS for the range thumb is injected once via ensureRangeStyles() and
-//  uses var(--accent) which _persistMode() keeps in sync.
-// ═════════════════════════════════════════════════════════════════════════════
-//  BybitTradingSettings — CRYPTO mode only
-//
-//  Renders a card with:
-//    • Margin Type toggle  — ISOLATED (default) | CROSS
-//    • Leverage slider     — 10× … 50×, default 20×
-//    • Auto-Trade status   — read-only summary (toggle lives on SignalsPage)
-//
-//  All changes POST to PATCH /api/bybit/settings immediately on interaction
-//  (no "Save" button needed — each control saves itself).
-// ═════════════════════════════════════════════════════════════════════════════
-function BybitTradingSettings({ marginType: initMarginType, leverage: initLeverage, autoTrade }) {
-  const { accent, accentDim, accentBdr } = useTheme();
-  const BYBIT_ORANGE = "#FFA500";
-  const clr          = BYBIT_ORANGE;
-
-  const [marginType, setMarginType] = useState(initMarginType ?? "ISOLATED");
-  const [leverage,   setLeverage]   = useState(initLeverage   ?? 20);
-  const [saving,     setSaving]     = useState(false);
-  const [saveMsg,    setSaveMsg]    = useState(null); // null | "ok" | "err"
-
-  // Persist changes to backend
-  const persist = async (patch) => {
-    setSaving(true);
-    setSaveMsg(null);
-    try {
-      await import("../utils/api").then(({ default: api }) =>
-        api.patch("/bybit/settings", patch)
-      );
-      setSaveMsg("ok");
-      setTimeout(() => setSaveMsg(null), 2200);
-    } catch {
-      setSaveMsg("err");
-      setTimeout(() => setSaveMsg(null), 3000);
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const handleMarginToggle = async (next) => {
-    setMarginType(next);
-    await persist({ bybit_margin_type: next });
-  };
-
-  const handleLeverageCommit = async () => {
-    await persist({ bybit_leverage: leverage });
-  };
-
-  // Leverage label
-  const levColor = leverage <= 10 ? "#aaaaaa"
-                 : leverage <= 20 ? BYBIT_ORANGE
-                 : leverage <= 35 ? "#ff8c00"
-                 : C.red;
-  const levLabel = leverage <= 5  ? "Conservative"
-                 : leverage <= 15 ? "Standard"
-                 : leverage <= 25 ? "Aggressive"
-                 : leverage <= 40 ? "High Risk"
-                 :                  "Maximum Risk";
+//  OandaRiskSlider — 0.5% to 10%, default 1%
+//  Conservative FX range. Thumb uses var(--accent) for live mode-follow.
+// ─────────────────────────────────────────────────────────────────────────────
+function OandaRiskSlider({ value, onChange }) {
+  const { accent } = useTheme();
+  const MIN = 0.5, MAX = 10.0;
+  const pct   = ((value - MIN) / (MAX - MIN)) * 100;
+  const color = value <= 1.5 ? accent : value <= 3.0 ? C.amber : C.red;
 
   return (
-    <div>
-      <p style={{
-        color: C.sub, fontSize: "0.6rem", fontWeight: 600,
-        letterSpacing: "0.12em", textTransform: "uppercase",
-        margin: "0 0 8px 4px", fontFamily: FONT_UI,
-      }}>
-        Bybit Trading Settings
-      </p>
-
-      <motion.div
-        animate={{
-          border:    `1px solid rgba(255,165,0,0.25)`,
-          boxShadow: "0 0 24px rgba(255,165,0,0.07)",
-        }}
-        transition={{ duration: 0.4 }}
-        style={{ borderRadius: 16, overflow: "hidden", background: C.card }}
-      >
-        {/* ── Header ──────────────────────────────────────────────────── */}
-        <div style={{
-          display: "flex", alignItems: "center", gap: 12,
-          padding: "14px 16px",
-          borderBottom: `1px solid ${C.cardBdr}`,
+    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+      <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between" }}>
+        <span style={{ color, fontSize: "1.6rem", fontWeight: 700, fontFamily: FONT_MONO, textShadow: `0 0 10px ${color}55` }}>
+          {parseFloat(value).toFixed(1)}%
+        </span>
+        <span style={{
+          fontSize: "0.62rem", fontWeight: 600, letterSpacing: "0.08em",
+          padding: "3px 8px", borderRadius: 6,
+          background: `${color}12`, border: `1px solid ${color}30`, color, fontFamily: FONT_UI,
         }}>
-          <div style={{
-            width: 40, height: 40, borderRadius: 12, flexShrink: 0,
-            display: "flex", alignItems: "center", justifyContent: "center",
-            fontSize: "1.2rem",
-            background: "rgba(255,165,0,0.1)",
-            border:     "1px solid rgba(255,165,0,0.3)",
-          }}>⚙️</div>
-          <div style={{ flex: 1 }}>
-            <p style={{ color: C.white, fontSize: "0.88rem", fontWeight: 600, margin: "0 0 2px" }}>
-              Futures Execution
-            </p>
-            <p style={{ color: C.sub, fontSize: "0.67rem", margin: 0 }}>
-              Applied to all Bybit auto-trade orders
-            </p>
-          </div>
-          {/* Save feedback badge */}
-          <AnimatePresence>
-            {saveMsg && (
-              <motion.span
-                initial={{ opacity: 0, scale: 0.8 }}
-                animate={{ opacity: 1, scale: 1 }}
-                exit={{ opacity: 0, scale: 0.8 }}
-                style={{
-                  fontSize: "0.6rem", fontWeight: 700, padding: "3px 9px",
-                  borderRadius: 6, letterSpacing: "0.08em", fontFamily: FONT_MONO,
-                  background: saveMsg === "ok" ? "rgba(0,255,65,0.1)" : "rgba(255,58,58,0.1)",
-                  border:     saveMsg === "ok" ? "1px solid rgba(0,255,65,0.3)" : "1px solid rgba(255,58,58,0.3)",
-                  color:      saveMsg === "ok" ? "#00FF41" : C.red,
-                }}
-              >
-                {saveMsg === "ok" ? "✓ SAVED" : "✕ ERROR"}
-              </motion.span>
-            )}
-          </AnimatePresence>
-        </div>
-
-        {/* ── Margin Type Toggle ──────────────────────────────────────── */}
-        <div style={{ padding: "14px 16px", borderBottom: `1px solid ${C.cardBdr}` }}>
-          <p style={{
-            color: C.label, fontSize: "0.62rem", textTransform: "uppercase",
-            letterSpacing: "0.1em", margin: "0 0 10px", fontFamily: FONT_UI,
-          }}>
-            Margin Mode
-          </p>
-          <div style={{
-            display:      "flex",
-            background:   "#0a0a0a",
-            border:       "1px solid rgba(255,165,0,0.2)",
-            borderRadius: 10,
-            padding:      2,
-            gap:          2,
-          }}>
-            {["ISOLATED", "CROSS"].map(mode => {
-              const isActive = marginType === mode;
-              return (
-                <button
-                  key={mode}
-                  onClick={() => !isActive && handleMarginToggle(mode)}
-                  disabled={saving}
-                  style={{
-                    flex:        1,
-                    padding:     "9px 0",
-                    borderRadius: 8,
-                    border:       "none",
-                    cursor:       isActive ? "default" : "pointer",
-                    background:   isActive ? "rgba(255,165,0,0.18)" : "transparent",
-                    boxShadow:    isActive ? "0 0 12px rgba(255,165,0,0.2)" : "none",
-                    transition:   "all 0.2s",
-                    WebkitTapHighlightColor: "transparent",
-                  }}
-                >
-                  <p style={{
-                    color:         isActive ? BYBIT_ORANGE : C.sub,
-                    fontSize:      "0.72rem",
-                    fontWeight:    isActive ? 700 : 400,
-                    letterSpacing: "0.07em",
-                    fontFamily:    FONT_MONO,
-                    margin:        0,
-                    transition:    "color 0.2s",
-                  }}>
-                    {mode}
-                  </p>
-                  <p style={{
-                    color:    isActive ? `${BYBIT_ORANGE}90` : "#333",
-                    fontSize: "0.55rem",
-                    margin:   "2px 0 0",
-                    fontFamily: FONT_UI,
-                  }}>
-                    {mode === "ISOLATED" ? "Risk capped per trade" : "Shared account balance"}
-                  </p>
-                </button>
-              );
-            })}
-          </div>
-          {marginType === "CROSS" && (
-            <motion.p
-              initial={{ opacity: 0, height: 0 }}
-              animate={{ opacity: 1, height: "auto" }}
-              style={{
-                color: C.amber, fontSize: "0.65rem", margin: "8px 0 0",
-                padding: "6px 10px", borderRadius: 7,
-                background: "rgba(255,184,0,0.06)",
-                border: "1px solid rgba(255,184,0,0.2)",
-              }}
-            >
-              ⚠ Cross margin uses your full account balance as collateral. A losing position can liquidate all funds.
-            </motion.p>
-          )}
-        </div>
-
-        {/* ── Leverage Slider ─────────────────────────────────────────── */}
-        <div style={{ padding: "14px 16px", borderBottom: `1px solid ${C.cardBdr}` }}>
-          <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 10 }}>
-            <p style={{
-              color: C.label, fontSize: "0.62rem", textTransform: "uppercase",
-              letterSpacing: "0.1em", margin: 0, fontFamily: FONT_UI,
-            }}>
-              Leverage
-            </p>
-            <div style={{ display: "flex", alignItems: "baseline", gap: 7 }}>
-              <span style={{
-                color: levColor, fontSize: "1.5rem", fontWeight: 800,
-                fontFamily: FONT_MONO, textShadow: `0 0 12px ${levColor}55`,
-                transition: "color 0.2s",
-              }}>
-                {leverage}×
-              </span>
-              <span style={{
-                fontSize: "0.58rem", fontWeight: 600, padding: "2px 7px", borderRadius: 5,
-                background: `${levColor}12`, border: `1px solid ${levColor}30`,
-                color: levColor, fontFamily: FONT_UI, letterSpacing: "0.06em",
-              }}>
-                {levLabel}
-              </span>
-            </div>
-          </div>
-
-          {/* Slider track + fill */}
-          <div style={{ position: "relative", marginBottom: 6 }}>
-            <div style={{
-              position: "absolute", top: "50%", left: 0, height: 6,
-              borderRadius: 3, pointerEvents: "none",
-              width: `${((leverage - 10) / 40) * 100}%`,
-              transform: "translateY(-50%)",
-              background: `linear-gradient(90deg, ${BYBIT_ORANGE}80, ${levColor})`,
-              boxShadow: `0 0 8px ${levColor}55`,
-              transition: "width 0.08s, background 0.3s",
-            }} />
-            <input
-              type="range" min="10" max="50" step="1" value={leverage}
-              onChange={e => setLeverage(parseInt(e.target.value))}
-              onMouseUp={handleLeverageCommit}
-              onTouchEnd={handleLeverageCommit}
-              style={{
-                WebkitAppearance: "none", appearance: "none",
-                width: "100%", height: 6, borderRadius: 3,
-                background: "rgba(255,255,255,0.06)", outline: "none",
-                cursor: "pointer", position: "relative", zIndex: 1,
-              }}
-            />
-          </div>
-
-          {/* Tick marks */}
-          <div style={{
-            display: "flex", justifyContent: "space-between",
-            fontSize: "0.55rem", color: C.sub, fontFamily: FONT_MONO, marginTop: 4,
-          }}>
-            {["10×","20×","30×","40×","50×"].map(t => (
-              <span key={t} style={{ color: t === `${leverage}×` ? levColor : C.sub }}>{t}</span>
-            ))}
-          </div>
-
-          {/* Risk info row */}
-          <div style={{
-            marginTop: 10, padding: "8px 10px", borderRadius: 8,
-            background: "rgba(0,0,0,0.35)", border: `1px solid ${C.cardBdr}`,
-            color: C.sub, fontSize: "0.67rem", lineHeight: 1.5,
-          }}>
-            At {leverage}× leverage, a <strong style={{ color: `${levColor}cc` }}>
-              {(100 / leverage).toFixed(1)}%
-            </strong> adverse move triggers liquidation ({marginType} mode).
-            Position size is auto-calculated from your risk % setting.
-          </div>
-        </div>
-
-        {/* ── Auto-Trade Status (read-only summary) ───────────────────── */}
-        <div style={{ padding: "12px 16px", display: "flex", alignItems: "center", gap: 10 }}>
-          <div style={{
-            width: 8, height: 8, borderRadius: "50%", flexShrink: 0,
-            background: autoTrade ? BYBIT_ORANGE : "#444",
-            boxShadow: autoTrade ? `0 0 8px ${BYBIT_ORANGE}` : "none",
-          }} />
-          <p style={{ color: C.sub, fontSize: "0.68rem", margin: 0 }}>
-            Auto-Trade is{" "}
-            <span style={{ color: autoTrade ? BYBIT_ORANGE : C.label, fontWeight: 700 }}>
-              {autoTrade ? "ENABLED" : "DISABLED"}
-            </span>
-            {" "}— toggle from the{" "}
-            <span style={{ color: C.label }}>Signals</span> page.
-          </p>
-        </div>
-      </motion.div>
-    </div>
-  );
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// ─────────────────────────────────────────────────────────────────────────────
-function RiskSlider({ value, onChange, accent: accentProp }) {
-  const { accent: themeAccent } = useTheme();
-  const accent = accentProp ?? themeAccent;
-  const pct   = ((value - 1.0) / (20.0 - 1.0)) * 100;
-  const color = value <= 5.0 ? accent : value <= 10.0 ? C.amber : C.red;
-
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {oandaRiskLabel(value)}
+        </span>
+      </div>
       <div style={{ position: "relative" }}>
         <div style={{
           position: "absolute", top: "50%", left: 0, height: 6, borderRadius: 3, pointerEvents: "none",
@@ -1376,7 +979,7 @@ function RiskSlider({ value, onChange, accent: accentProp }) {
           boxShadow: `0 0 6px ${color}55`, transition: "width 0.05s, background 0.4s",
         }} />
         <input
-          type="range" min="1" max="20" step="0.5" value={value}
+          type="range" min={MIN} max={MAX} step="0.5" value={value}
           onChange={e => onChange(parseFloat(e.target.value))}
           style={{
             WebkitAppearance: "none", appearance: "none",
@@ -1387,16 +990,88 @@ function RiskSlider({ value, onChange, accent: accentProp }) {
         />
       </div>
       <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.58rem", color: C.sub, fontFamily: FONT_MONO }}>
-        <span>1%</span><span>5%</span><span>10%</span><span>15%</span><span>20%</span>
+        <span>0.5%</span><span>2.5%</span><span>5%</span><span>7.5%</span><span>10%</span>
+      </div>
+      <div style={{
+        padding: "8px 10px", borderRadius: 8,
+        background: "rgba(0,0,0,0.35)", border: `1px solid ${C.cardBdr}`,
+        color: C.sub, fontSize: "0.68rem", lineHeight: 1.5,
+      }}>
+        Each Oanda trade risks {parseFloat(value).toFixed(1)}% of NAV.
+        At $10,000 that is ${(10000 * value / 100).toFixed(0)} per signal.
       </div>
     </div>
   );
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
-function riskLabel(pct) {
-  if (pct <= 3.0)  return "Conservative";
-  if (pct <= 7.0)  return "Standard";
-  if (pct <= 12.0) return "Aggressive";
+// ─────────────────────────────────────────────────────────────────────────────
+//  BybitRiskSlider — 5% to 50%, default 20%
+//  Higher range for small crypto accounts where $5–$10 minimums demand ≥10%.
+// ─────────────────────────────────────────────────────────────────────────────
+function BybitRiskSlider({ value, onChange }) {
+  const { accent } = useTheme();
+  const MIN = 5, MAX = 50;
+  const pct   = ((value - MIN) / (MAX - MIN)) * 100;
+  const color = value <= 20 ? accent : value <= 35 ? C.amber : C.red;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+      <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between" }}>
+        <span style={{ color, fontSize: "1.6rem", fontWeight: 700, fontFamily: FONT_MONO, textShadow: `0 0 10px ${color}55` }}>
+          {parseFloat(value).toFixed(0)}%
+        </span>
+        <span style={{
+          fontSize: "0.62rem", fontWeight: 600, letterSpacing: "0.08em",
+          padding: "3px 8px", borderRadius: 6,
+          background: `${color}12`, border: `1px solid ${color}30`, color, fontFamily: FONT_UI,
+        }}>
+          {bybitRiskLabel(value)}
+        </span>
+      </div>
+      <div style={{ position: "relative" }}>
+        <div style={{
+          position: "absolute", top: "50%", left: 0, height: 6, borderRadius: 3, pointerEvents: "none",
+          width: `${pct}%`, transform: "translateY(-50%)",
+          background: `linear-gradient(90deg, ${accent}, ${color})`,
+          boxShadow: `0 0 6px ${color}55`, transition: "width 0.05s, background 0.4s",
+        }} />
+        <input
+          type="range" min={MIN} max={MAX} step="5" value={value}
+          onChange={e => onChange(parseFloat(e.target.value))}
+          style={{
+            WebkitAppearance: "none", appearance: "none",
+            width: "100%", height: 6, borderRadius: 3,
+            background: "rgba(255,255,255,0.06)", outline: "none",
+            cursor: "pointer", position: "relative", zIndex: 1,
+          }}
+        />
+      </div>
+      <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.58rem", color: C.sub, fontFamily: FONT_MONO }}>
+        <span>5%</span><span>15%</span><span>25%</span><span>35%</span><span>50%</span>
+      </div>
+      <div style={{
+        padding: "8px 10px", borderRadius: 8,
+        background: "rgba(0,0,0,0.35)", border: `1px solid ${C.cardBdr}`,
+        color: C.sub, fontSize: "0.68rem", lineHeight: 1.5,
+      }}>
+        Each Bybit trade risks {parseFloat(value).toFixed(0)}% of available balance.
+        At $500 that is ${(500 * value / 100).toFixed(0)} per signal.
+      </div>
+    </div>
+  );
+}
+
+// ── Risk label helpers ────────────────────────────────────────────────────────
+function oandaRiskLabel(pct) {
+  if (pct <= 1.0) return "Conservative";
+  if (pct <= 2.0) return "Standard";
+  if (pct <= 4.0) return "Aggressive";
   return "High Risk";
+}
+
+function bybitRiskLabel(pct) {
+  if (pct <= 15) return "Cautious";
+  if (pct <= 25) return "Standard";
+  if (pct <= 35) return "Aggressive";
+  return "Max Risk";
 }

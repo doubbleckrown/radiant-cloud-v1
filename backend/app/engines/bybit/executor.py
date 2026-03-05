@@ -456,7 +456,7 @@ async def auto_execute(sym: str, sig_dict: dict, signal: TradeSignal) -> None:
             return
 
         clerk_id    = sig_dict.get("clerk_id", "")
-        risk_pct    = get_risk_pct(clerk_id, "bybit") if clerk_id else 0.10
+        risk_pct    = get_risk_pct(clerk_id, "bybit") if clerk_id else 0.20   # default 20%
         sizing_base = available if available > 0 else equity
         # Risk amount = % of available balance, floored at $1.20 minimum margin
         risk_usd = max(sizing_base * risk_pct, 1.20)

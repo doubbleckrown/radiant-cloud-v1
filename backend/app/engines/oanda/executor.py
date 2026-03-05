@@ -191,7 +191,7 @@ async def auto_execute(ins: str, sig_dict: dict, signal: TradeSignal) -> None:
 
         # Use per-user risk if a clerk_id was embedded in sig_dict, else default
         clerk_id = sig_dict.get("clerk_id", "")
-        risk_pct = get_risk_pct(clerk_id, "oanda") if clerk_id else 0.10
+        risk_pct = get_risk_pct(clerk_id, "oanda") if clerk_id else 0.01   # default 1%
         risk_usd = nav * risk_pct
 
         is_long  = signal.direction.value == "LONG"

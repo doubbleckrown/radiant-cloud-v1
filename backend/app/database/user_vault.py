@@ -30,8 +30,13 @@ _VAULT_DIR.mkdir(parents=True, exist_ok=True)
 
 # Per-key defaults
 _DEFAULTS: dict = {
-    "oanda_risk_pct": 10.0,
-    "bybit_risk_pct": 10.0,
+    # Oanda: conservative FX account — 1% per trade is the industry standard.
+    # A $10,000 account risks $100 per signal, fully sized by pip-value formula.
+    "oanda_risk_pct": 1.0,
+    # Bybit: aggressive crypto account — 20% per trade because crypto accounts
+    # are typically much smaller (e.g. $200–$500) and need higher % per trade
+    # to produce meaningful position sizes above the exchange minimum.
+    "bybit_risk_pct": 20.0,
     "bot_enabled":    True,
     "ttl_minutes":    120,
 }
@@ -74,9 +79,11 @@ def save_profile(clerk_id: str, data: dict) -> dict:
 
     # Validate + clamp incoming fields
     if "oanda_risk_pct" in data:
-        current["oanda_risk_pct"] = max(1.0, min(20.0, float(data["oanda_risk_pct"])))
+        # Oanda range: 0.5% – 10.0%  (forex capital management)
+        current["oanda_risk_pct"] = max(0.5, min(10.0, float(data["oanda_risk_pct"])))
     if "bybit_risk_pct" in data:
-        current["bybit_risk_pct"] = max(1.0, min(20.0, float(data["bybit_risk_pct"])))
+        # Bybit range: 5.0% – 50.0%  (crypto with small capital base)
+        current["bybit_risk_pct"] = max(5.0, min(50.0, float(data["bybit_risk_pct"])))
     if "bot_enabled" in data:
         current["bot_enabled"] = bool(data["bot_enabled"])
     if "ttl_minutes" in data:
