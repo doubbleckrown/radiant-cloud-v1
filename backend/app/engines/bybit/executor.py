@@ -30,7 +30,7 @@ from app.core.config import (
 )
 from app.core.trade_tracker import trade_tracker
 from app.services.strategy import TradeSignal
-from app.engines.sl_tp import candle_anchor_levels
+from app.engines.sl_tp import candle_anchor_levels, bybit_qty
 import app.core.state as state
 
 logger = logging.getLogger("fx-signal")
@@ -416,14 +416,14 @@ async def auto_execute(sym: str, sig_dict: dict, signal: TradeSignal) -> None:
         if mark_price <= 0:
             mark_price = await fetch_mark_price(sym)
 
-        # ── 2. Candle-Anchor SL/TP ────────────────────────────────────────────
-        # Recalculate SL/TP at execution time from the MarkPrice and the
-        # previous H1 candle's Low (Buy) or High (Sell) as the structural anchor.
-        # This replaces the SMC engine's stale theoretical levels and guarantees
-        # geometry is valid relative to the *current* price, not the signal price.
-        is_long = signal.direction.value == "LONG"
-        side    = "Buy" if is_long else "Sell"
+        # ── 2. Zone-Anchored SL/TP (SMC-correct) ────────────────────────────
+        # Pass the OB/FVG zone object from the signal so the SL is anchored at
+        # the institutional zone boundary, not an arbitrary recent candle.
+        # This eliminates micro-stops from tight consolidation bars.
+        is_long    = signal.direction.value == "LONG"
+        side       = "Buy" if is_long else "Sell"
         h1_candles = state.bybit_candle_cache.get(sym, {}).get("60", [])
+        zone_obj   = getattr(signal, "layer2_zone_obj", None)
 
         try:
             sl, tp, sl_dist = candle_anchor_levels(
@@ -432,14 +432,21 @@ async def auto_execute(sym: str, sig_dict: dict, signal: TradeSignal) -> None:
                 is_long    = is_long,
                 instrument = sym,
                 is_bybit   = True,
+                zone       = zone_obj,
             )
         except ValueError as ve:
-            logger.warning("Bybit AutoExec SKIPPED %s %s — candle anchor: %s", sym, side, ve)
+            logger.warning("Bybit AutoExec SKIPPED %s %s — SL/TP anchor: %s", sym, side, ve)
             sig_dict["exec_status"] = "skipped"
             sig_dict["exec_error"]  = f"Skipped: {ve}"
             return
 
-        # ── 3. Account equity + risk-sized qty ───────────────────────────────
+        # ── Patch sig_dict so UI shows ACTUAL execution levels ───────────────
+        rr_actual = round(abs(tp - mark_price) / abs(mark_price - sl), 2) if sl != mark_price else 0
+        sig_dict["sl"] = sl
+        sig_dict["tp"] = tp
+        sig_dict["rr"] = rr_actual
+
+        # ── 3. Account balance + risk-sized qty ──────────────────────────────
         acct_data = await fetch_account(api_key, secret)
         equity    = float(acct_data.get("totalEquity",           0) or 0)
         available = float(acct_data.get("totalAvailableBalance", 0) or 0)
@@ -448,37 +455,48 @@ async def auto_execute(sym: str, sig_dict: dict, signal: TradeSignal) -> None:
             sig_dict["exec_error"]  = "Zero account equity"
             return
 
-        clerk_id = sig_dict.get("clerk_id", "")
-        risk_pct = get_risk_pct(clerk_id, "bybit") if clerk_id else 0.10
-
-        # Use totalAvailableBalance (free margin) as the sizing base, NOT
-        # totalEquity.  Equity includes unrealised PnL from open positions —
-        # using it overstates what Bybit will actually let us allocate and
-        # causes retCode 110007 "ab not enough for new order".
-        #
-        # Additionally cap the initial margin at 90% of available balance so
-        # there is always headroom for fees and the minimum margin reserve.
-        # Formula: initial_margin = qty * mark_price / lev = risk_usd (by design)
-        # So simply: risk_usd ≤ 0.90 × available
+        clerk_id    = sig_dict.get("clerk_id", "")
+        risk_pct    = get_risk_pct(clerk_id, "bybit") if clerk_id else 0.10
         sizing_base = available if available > 0 else equity
-        risk_usd    = min(
-            max(sizing_base * risk_pct, 1.20),  # at least $1.20 initial margin
-            sizing_base * 0.90,                  # never exceed 90% of free balance
-        )
+        # Risk amount = % of available balance, floored at $1.20 minimum margin
+        risk_usd = max(sizing_base * risk_pct, 1.20)
 
-        if risk_usd <= 0:
+        if sizing_base <= 0:
             sig_dict["exec_status"] = "failed"
             sig_dict["exec_error"]  = f"Insufficient available balance: {available:.2f} USDT"
             return
 
-        lev     = _safe_leverage(mark_price, sl, BYBIT_DEFAULT_LEVERAGE)
-        qty_raw = (risk_usd * lev) / (sl_dist * mark_price)
+        lev = _safe_leverage(mark_price, sl, BYBIT_DEFAULT_LEVERAGE)
+
+        # ── Correct quantity formula for linear USDT perpetuals ───────────────
+        # For Bybit linear perps: P&L = qty × price_move (USDT, 1:1 per contract).
+        # Therefore: qty = risk_usd / sl_dist   (leverage NOT in this formula).
+        # Leverage only governs margin: margin = qty × mark_price / lev.
+        #
+        # Previous formula (risk_usd * lev) / (sl_dist * mark_price) was wrong:
+        #   BTC $50k, risk=$100, sl_dist=$500, lev=20 → qty=0.00008 BTC → loss=$0.04
+        #   Correct: qty = 100/500 = 0.2 BTC → loss = 0.2 × 500 = $100 ✓
+        try:
+            qty_raw, margin_used = bybit_qty(
+                risk_usd   = risk_usd,
+                sl_dist    = sl_dist,
+                mark_price = mark_price,
+                leverage   = lev,
+                available  = sizing_base,
+            )
+        except ValueError as ve:
+            sig_dict["exec_status"] = "failed"
+            sig_dict["exec_error"]  = f"Qty sizing error: {ve}"
+            return
+
         min_qty = BYBIT_MIN_ORDER_QTY.get(sym, 0.001) if isinstance(BYBIT_MIN_ORDER_QTY, dict) else 0.001
         qty_str = _snap_qty(max(qty_raw, min_qty), sym)
 
         logger.info(
-            "Bybit AutoExec %s %s: mark=%.5f sl=%.5f tp=%.5f sl_dist=%.5f qty=%s lev=%d×",
-            sym, side, mark_price, sl, tp, sl_dist, qty_str, lev,
+            "Bybit AutoExec %s %s: mark=%.5f sl=%.5f tp=%.5f rr=1:%.2f "
+            "sl_dist=%.5f risk=$%.2f qty=%s lev=%d× margin=$%.2f",
+            sym, side, mark_price, sl, tp, rr_actual,
+            sl_dist, risk_usd, qty_str, lev, margin_used,
         )
 
         trade_tracker.lock(sym, signal.direction.value, mark_price, "pending", sl=sl, tp=tp)
@@ -487,16 +505,18 @@ async def auto_execute(sym: str, sig_dict: dict, signal: TradeSignal) -> None:
         trade_tracker.lock(sym, signal.direction.value, mark_price, trade_id, sl=sl, tp=tp)
 
         sig_dict.update({
-            "exec_status":    "ok",
-            "exec_order_id":  trade_id,
-            "exec_qty":       qty_str,
-            "exec_side":      side,
+            "exec_status":     "ok",
+            "exec_order_id":   trade_id,
+            "exec_qty":        qty_str,
+            "exec_side":       side,
             "exec_mark_price": mark_price,
-            "exec_sl":        sl,
-            "exec_tp":        tp,
+            "exec_sl":         sl,
+            "exec_tp":         tp,
+            "exec_rr":         rr_actual,
+            "exec_margin":     round(margin_used, 2),
         })
-        logger.info("✅ BYBIT AUTO-EXEC: %s %s qty=%s lev=%d× mark=%.5f sl=%.5f tp=%.5f",
-                    sym, side, qty_str, lev, mark_price, sl, tp)
+        logger.info("✅ BYBIT AUTO-EXEC: %s %s qty=%s lev=%d× mark=%.5f sl=%.5f tp=%.5f rr=1:%.2f",
+                    sym, side, qty_str, lev, mark_price, sl, tp, rr_actual)
 
     except Exception as exc:
         import traceback as _tb

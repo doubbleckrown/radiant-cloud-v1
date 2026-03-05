@@ -113,16 +113,17 @@ class ConfirmationState:
 
 @dataclass
 class TradeSignal:
-    instrument:  str
-    direction:   SignalDirection
-    entry_price: float
-    stop_loss:   float
-    take_profit: float  # 1:2 RR by default
-    confidence:  int
-    layer1_bias: str
-    layer2_zone: str
-    layer3_mss:  bool
-    timestamp:   int
+    instrument:       str
+    direction:        SignalDirection
+    entry_price:      float
+    stop_loss:        float
+    take_profit:      float  # 1:3 RR by default
+    confidence:       int
+    layer1_bias:      str
+    layer2_zone:      str    # human-readable label for the UI
+    layer2_zone_obj:  object # raw OB or FVG object — used by sl_tp.py for zone anchor
+    layer3_mss:       bool
+    timestamp:        int
 
     @property
     def risk_reward(self) -> float:
@@ -360,17 +361,34 @@ def calculate_dynamic_sl(
     swing_lookback: int = 5,
     sl_buffer_pct: float = 0.0002,   # 0.02% beyond swing
 ) -> float:
-    """Place SL beyond the nearest SMC swing point, not fixed pips."""
+    """
+    Place SL beyond the nearest SMC structural level, not fixed pips.
+
+    LONG:  nearest swing LOW strictly below entry (sorted descending → [0] = nearest).
+    SHORT: nearest swing HIGH strictly above entry (sorted ascending  → [0] = nearest).
+
+    Bug fix: original SHORT code used sorted() ascending with no price filter, so
+    highs[0] = the LOWEST swing high — which in a downtrend is BELOW current price,
+    producing a stop loss below entry on a SHORT trade.
+    """
     swings = identify_swing_points(candles, swing_lookback)
     buffer = entry * sl_buffer_pct
 
     if direction == SignalDirection.LONG:
-        lows = sorted([s.price for s in swings if s.kind == "SL"], reverse=True)
+        # Only consider swing lows that are strictly below entry price
+        lows = sorted(
+            [s.price for s in swings if s.kind == "SL" and s.price < entry],
+            reverse=True,   # descending → lows[0] = nearest support below entry
+        )
         sl_level = lows[0] if lows else entry * 0.998
         return sl_level - buffer
 
-    else:
-        highs = sorted([s.price for s in swings if s.kind == "SH"])
+    else:  # SHORT
+        # Only consider swing highs that are strictly above entry price
+        highs = sorted(
+            [s.price for s in swings if s.kind == "SH" and s.price > entry]
+            # ascending → highs[0] = lowest high above entry = nearest resistance
+        )
         sl_level = highs[0] if highs else entry * 1.002
         return sl_level + buffer
 
@@ -471,6 +489,7 @@ class SMCConfluenceEngine:
             confidence=100,
             layer1_bias=state.layer1_bias.value,
             layer2_zone=zone_label,
+            layer2_zone_obj=state.layer2_zone,   # raw OB/FVG → zone-anchor in sl_tp.py
             layer3_mss=state.layer3_mss,
             timestamp=timestamp,
         )

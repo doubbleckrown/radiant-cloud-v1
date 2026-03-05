@@ -20,7 +20,7 @@ from app.core.config import (
 from app.core.trade_tracker import trade_tracker
 from app.core.alerts import push_notification
 from app.services.strategy import Candle, TradeSignal
-from app.engines.sl_tp import candle_anchor_levels
+from app.engines.sl_tp import candle_anchor_levels, oanda_units
 import app.core.state as state
 
 logger = logging.getLogger("fx-signal")
@@ -102,17 +102,8 @@ async def fetch_candles(instrument: str, granularity: str, count: int = 250) -> 
 #  Order placement
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _compute_units(instrument: str, risk_usd: float, sl_dist: float, is_long: bool) -> int:
-    """
-    Compute Oanda unit size. Always returns a non-zero integer.
-    XAU_USD / metals / indices: floor to minimum 1 unit.
-    """
-    if sl_dist <= 0:
-        return 0
-    raw     = risk_usd / sl_dist
-    minimum = OANDA_MIN_UNITS.get(instrument, 1)
-    units   = max(int(raw), minimum)
-    return units if is_long else -units
+# _compute_units removed — replaced by oanda_units() in app/engines/sl_tp.py
+# which correctly accounts for pip-value normalisation across all instrument classes.
 
 
 async def place_market_order(
@@ -205,15 +196,20 @@ async def auto_execute(ins: str, sig_dict: dict, signal: TradeSignal) -> None:
 
         is_long  = signal.direction.value == "LONG"
 
-        # ── Candle-Anchor SL/TP ───────────────────────────────────────────────
-        # Recalculate SL/TP fresh at execution time using the current live price
-        # and the previous H1 candle's Low (Buy) or High (Sell) as the anchor.
-        # This replaces the SMC engine's theoretical levels which may be stale.
-        #
-        # Live bid/ask midpoint from the SSE price stream (updated every tick).
-        # Falls back to signal.entry_price only if the price stream has a gap.
+        # ── Live price ───────────────────────────────────────────────────────
+        # Use the streaming price (updated every tick).
+        # Falls back to signal.entry_price only if stream has a gap.
         live_price = float(state.latest_prices.get(ins) or signal.entry_price)
         h1_candles = state.candle_cache.get(ins, {}).get("H1", [])
+
+        # ── Zone-Anchored SL/TP (SMC-correct) ────────────────────────────────
+        # Pass the OB/FVG zone object from the signal so the SL is anchored at
+        # the institutional zone boundary, not an arbitrary recent candle.
+        # This eliminates micro-stops caused by tight consolidation bars.
+        #
+        # The zone is carried in signal.layer2_zone_obj if the engine exposes it.
+        # Falls back to None (previous-candle anchor with ATR floor) if absent.
+        zone_obj   = getattr(signal, "layer2_zone_obj", None)
 
         try:
             sl, tp, sl_dist = candle_anchor_levels(
@@ -222,19 +218,44 @@ async def auto_execute(ins: str, sig_dict: dict, signal: TradeSignal) -> None:
                 is_long    = is_long,
                 instrument = ins,
                 is_bybit   = False,
+                zone       = zone_obj,
             )
         except ValueError as ve:
-            logger.warning("Oanda AutoExec SKIPPED %s — candle anchor: %s", ins, ve)
+            logger.warning("Oanda AutoExec SKIPPED %s — SL/TP anchor: %s", ins, ve)
             sig_dict["exec_status"] = "skipped"
             sig_dict["exec_error"]  = f"Skipped: {ve}"
             return
 
+        # ── Patch sig_dict so UI shows the ACTUAL filled levels ──────────────
+        # Previously sig_dict showed signal.stop_loss/take_profit (stale signal-
+        # time values). Now we overwrite with the live execution levels so the
+        # displayed RR matches the order actually placed on the exchange.
+        rr_actual = round(abs(tp - live_price) / abs(live_price - sl), 2) if sl != live_price else 0
+        sig_dict["sl"] = sl
+        sig_dict["tp"] = tp
+        sig_dict["rr"] = rr_actual
+
         logger.info(
-            "Oanda AutoExec %s %s: live=%.5f sl=%.5f tp=%.5f sl_dist=%.5f",
-            ins, "LONG" if is_long else "SHORT", live_price, sl, tp, sl_dist,
+            "Oanda AutoExec %s %s: live=%.5f sl=%.5f tp=%.5f sl_dist=%.5f rr=1:%.2f",
+            ins, "LONG" if is_long else "SHORT", live_price, sl, tp, sl_dist, rr_actual,
         )
 
-        units = _compute_units(ins, risk_usd, sl_dist, is_long)
+        # ── Pip-value correct unit sizing ────────────────────────────────────
+        # Replaces risk_usd / sl_dist which was only correct for USD-quote pairs.
+        # oanda_units() normalises for JPY crosses, metals, and indices.
+        try:
+            units = oanda_units(
+                instrument = ins,
+                mark_price = live_price,
+                sl_dist    = sl_dist,
+                risk_usd   = risk_usd,
+                is_long    = is_long,
+            )
+        except ValueError as ve:
+            sig_dict["exec_status"] = "failed"
+            sig_dict["exec_error"]  = f"Unit sizing error: {ve}"
+            return
+
         if units == 0:
             sig_dict["exec_status"] = "failed"
             sig_dict["exec_error"]  = "Computed 0 units — SL distance too small"
