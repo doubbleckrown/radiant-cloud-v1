@@ -119,6 +119,23 @@ if (!PUBLISHABLE_KEY) {
     <React.StrictMode>
       <ClerkProvider
         publishableKey={PUBLISHABLE_KEY}
+
+        // Fix 1 — replaces deprecated `redirectUrl` prop
+        // `fallbackRedirectUrl` is the v5 standard: used when no explicit
+        // post-auth destination is provided by the component or the URL.
+        fallbackRedirectUrl="/"
+        signInFallbackRedirectUrl="/"
+        signUpFallbackRedirectUrl="/"
+
+        // Fix 2 — allow dev/test keys to function on this live Vercel origin.
+        // Without this list, Clerk's SDK rejects post-auth redirects back to
+        // the app and the sign-in page loops indefinitely.
+        allowedRedirectOrigins={[
+          "https://radiant-cloud-v1.vercel.app",
+          "http://localhost:5173",
+          "http://localhost:3000",
+        ]}
+
         afterSignOutUrl="/"
       >
         <App />
