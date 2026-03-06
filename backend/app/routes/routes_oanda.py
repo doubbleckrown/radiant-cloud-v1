@@ -14,7 +14,7 @@ from app.core.trade_tracker import trade_tracker
 from app.core.config import TRADE_LOCK_TTL_SECONDS
 from app.engines.oanda.executor import (
     fetch_account_summary, fetch_open_trades, fetch_trade_history,
-    place_market_order, close_trade, compute_units,
+    place_market_order, close_trade,
 )
 
 router = APIRouter(prefix="/api", tags=["oanda"])

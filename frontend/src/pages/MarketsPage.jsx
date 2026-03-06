@@ -317,8 +317,8 @@ export default function MarketsPage() {
 
           // ── 100% Panic Glow — spec colours from design brief ────────────
           const isPanic    = conf >= 100;
-          const isBull100  = isPanic && (bias === "LONG"  || bias === "BULL");
-          const isBear100  = isPanic && (bias === "SHORT" || bias === "BEAR");
+          const isBull100  = isPanic && (bias === "LONG"  || bias === "BULLISH");
+          const isBear100  = isPanic && (bias === "SHORT" || bias === "BEARISH");
           const panicGlow  = isBull100
             ? "drop-shadow(0 0 15px #4ADE80) drop-shadow(0 0 6px #4ADE8060)"
             : isBear100
@@ -469,9 +469,9 @@ export default function MarketsPage() {
 
 // ── ConfBadge ─────────────────────────────────────────────────────────────────
 function ConfBadge({ conf, bias, accent }) {
-  const isBullish  = bias === "LONG"  || bias === "BULL";
-  const isBearish  = bias === "SHORT" || bias === "BEAR";
-  const biasLabel  = isBullish ? "BULL" : isBearish ? "BEAR" : "";
+  const isBullish  = bias === "LONG"  || bias === "BULLISH";
+  const isBearish  = bias === "SHORT" || bias === "BEARISH";
+  const biasLabel  = isBullish ? "LONG" : isBearish ? "SHORT" : "";
 
   // ── Layered Confluence Color Evolution (matches SignalsPage spec) ─────────
   // L1 (34%) : Grey       — Directional bias only

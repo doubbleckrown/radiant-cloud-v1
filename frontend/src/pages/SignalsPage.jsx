@@ -472,13 +472,13 @@ function SignalCard({ sig, locked, isActive, isCrypto, accent, accentDim, accent
               background: isLong ? "rgba(0,255,65,0.12)" : "rgba(255,0,0,0.12)",
               border: `1px solid ${dirColor}50`,
               color: dirColor, fontFamily: FONT_MONO,
-              // Spec: true green #00FF00 glow for BULLISH, true red #FF0000 for BEARISH
+              // Spec: true green #00FF00 glow for LONG, true red #FF0000 for SHORT
               textShadow: isLong
                 ? "0 0 12px rgba(0,255,0,0.9)"
                 : "0 0 12px rgba(255,0,0,0.9)",
               filter: `drop-shadow(0 0 8px ${dirColor}bb)`,
             }}>
-              {isLong ? "BULLISH" : "BEARISH"}
+              {isLong ? "LONG" : "SHORT"}
             </span>
             {locked && (
               <span style={{
