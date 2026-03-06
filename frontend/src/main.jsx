@@ -120,23 +120,16 @@ if (!PUBLISHABLE_KEY) {
       <ClerkProvider
         publishableKey={PUBLISHABLE_KEY}
 
-        // Fix 1 — replaces deprecated `redirectUrl` prop
-        // `fallbackRedirectUrl` is the v5 standard: used when no explicit
-        // post-auth destination is provided by the component or the URL.
-        fallbackRedirectUrl="/"
-        signInFallbackRedirectUrl="/"
-        signUpFallbackRedirectUrl="/"
+        // Account Portal hosted pages — paths set in Clerk Dashboard.
+        signInUrl="https://immune-donkey-10.accounts.dev/sign-in"
+        signUpUrl="https://immune-donkey-10.accounts.dev/sign-up"
 
-        // Fix 2 — allow dev/test keys to function on this live Vercel origin.
-        // Without this list, Clerk's SDK rejects post-auth redirects back to
-        // the app and the sign-in page loops indefinitely.
-        allowedRedirectOrigins={[
-          "https://radiant-cloud-v1.vercel.app",
-          "http://localhost:5173",
-          "http://localhost:3000",
-        ]}
-
-        afterSignOutUrl="/"
+        // `fallbackRedirectUrl` is the v5 replacement for deprecated `redirectUrl`.
+        // Full absolute URL required when using Account Portal on a live domain.
+        fallbackRedirectUrl="https://radiant-cloud-v1.vercel.app"
+        signInFallbackRedirectUrl="https://radiant-cloud-v1.vercel.app"
+        signUpFallbackRedirectUrl="https://radiant-cloud-v1.vercel.app"
+        afterSignOutUrl="https://immune-donkey-10.accounts.dev/sign-in"
       >
         <App />
       </ClerkProvider>

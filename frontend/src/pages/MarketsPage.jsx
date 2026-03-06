@@ -26,6 +26,7 @@ const FONT_UI   = "'Inter', sans-serif";
 const FONT_MONO = "'JetBrains Mono', monospace";
 
 const C = {
+  green:   "#00FF41",
   red:     "#FF3A3A",
   amber:   "#FFB800",
   white:   "#ffffff",
@@ -273,7 +274,7 @@ export default function MarketsPage() {
               Markets
             </h1>
             <p style={{ color: C.sub, fontSize: "0.62rem", margin: 0, fontFamily: FONT_MONO }}>
-              {liveCount} live · {isCrypto ? "Bybit Linear Futures" : "Oanda v20"}
+              {liveCount} live · {isCrypto ? "Bybit Linear · SMC/ICT v3" : "Oanda v20 · SMC/ICT v3"}
             </p>
           </div>
         </div>
@@ -471,31 +472,43 @@ export default function MarketsPage() {
 function ConfBadge({ conf, bias, accent }) {
   const isBullish  = bias === "LONG"  || bias === "BULLISH";
   const isBearish  = bias === "SHORT" || bias === "BEARISH";
-  const biasLabel  = isBullish ? "LONG" : isBearish ? "SHORT" : "";
+  const biasLabel  = isBullish ? "BULLISH" : isBearish ? "BEARISH" : "";
 
-  // ── Layered Confluence Color Evolution (matches SignalsPage spec) ─────────
-  // L1 (34%) : Grey       — Directional bias only
-  // L2 (67%) : Amber      — OB/FVG zone confirmed
-  // L3 (100%): Pure Green/Red — Full confluence. Spec: #00FF00/#FF0000
+  // ── Layered Confluence Color Evolution — SMC/ICT v3 stages ─────────────────
+  // Stage 1 (34%) : Grey       — Daily HTF bias confirmed (HH+HL or EMA alignment)
+  // Stage 2 (67%) : Blue       — H1 Liquidity sweep detected (stop-hunt confirmed)
+  // Stage 3+4 (100%): Green/Red — H1 MSS (CHoCH/BOS) + M5 OB or FVG entry zone
   const layerColor = conf >= 100
     ? (isBullish ? "#00FF00" : isBearish ? "#FF0000" : accent)
     : conf >= 67
-    ? "#FFB800"
+    ? "#00BFFF"    // H1 Liquidity Sweep stage — cyan/blue
     : conf >= 34
     ? "#888888"
     : C.sub;
 
-  // At 100%, directional labels override to spec-exact true colors
   const labelColor = layerColor;
 
   const glowColor = conf >= 100
     ? (isBullish ? "rgba(0,255,0,0.85)" : isBearish ? "rgba(255,0,0,0.85)" : null)
     : conf >= 67
-    ? "rgba(255,184,0,0.6)"
+    ? "rgba(0,191,255,0.6)"    // H1 sweep glow
     : null;
+
+  // Stage sublabel — shown below the confidence number
+  const stageLabel = conf >= 100
+    ? "FULL CONF"
+    : conf >= 67
+    ? "LIQ SWEPT"
+    : conf >= 34
+    ? "D BIAS"
+    : "";
 
   return (
     <span style={{
+      display:       "inline-flex",
+      flexDirection: "column",
+      alignItems:    "center",
+      gap:           1,
       fontSize:      "0.6rem",
       fontWeight:    700,
       padding:       "2px 7px",
@@ -507,8 +520,14 @@ function ConfBadge({ conf, bias, accent }) {
       letterSpacing: "0.06em",
       textShadow:    glowColor ? `0 0 10px ${glowColor}` : "none",
       filter:        conf >= 67 ? `drop-shadow(0 0 6px ${labelColor}99)` : "none",
+      lineHeight:    1.2,
     }}>
-      {conf}% {biasLabel}
+      <span>{conf}% {biasLabel}</span>
+      {stageLabel && (
+        <span style={{ fontSize: "0.45rem", opacity: 0.7, letterSpacing: "0.1em" }}>
+          {stageLabel}
+        </span>
+      )}
     </span>
   );
 }
@@ -680,8 +699,8 @@ function InlineChart({ instrument, isCrypto, granularity, setGranularity, accent
           >{g}</button>
         ))}
         <div style={{ marginLeft: "auto", display: "flex", gap: 6, alignItems: "center" }}>
-          {analysis?.layer2 && <MiniTag label="OB/FVG" accent={accent} />}
-          {analysis?.layer3 && <MiniTag label="MSS"    accent={accent} />}
+          {analysis?.layer2 && <MiniTag label="LIQ SWEPT" accent="#00BFFF" />}
+          {analysis?.layer3 && <MiniTag label="MSS+ZONE" accent={accent} />}
           {hasSignal && (
             <MiniTag
               label={sigDir === "LONG" ? "▲ LONG" : "▼ SHORT"}
@@ -690,6 +709,15 @@ function InlineChart({ instrument, isCrypto, granularity, setGranularity, accent
           )}
         </div>
       </div>
+
+      {/* ── SMC/ICT v3 Pipeline Stage Strip ──────────────────────────────────
+           Shows which of the 4 algorithm stages are currently confirmed.
+           Inferred from analysis.confidence + analysis.layer2/layer3.
+           Oanda bulk endpoint only sends confidence (no layer2/layer3 bools),
+           so we infer from thresholds. Bybit sends explicit bool fields.    */}
+      {analysis && (analysis.confidence > 0 || analysis.layer2 || analysis.layer3) && (
+        <SMCPipelineStrip analysis={analysis} accent={accent} />
+      )}
 
       {/* ── TP/SL legend strip — shown only when a signal is present ─────── */}
       {hasSignal && (
@@ -744,9 +772,84 @@ function InlineChart({ instrument, isCrypto, granularity, setGranularity, accent
       {/* No-signal note — only shown when the chart is open but no signal yet */}
       {!hasSignal && !loading && (
         <p style={{ color: C.sub, fontSize: "0.6rem", textAlign: "center", margin: "8px 0 0", fontFamily: FONT_MONO }}>
-          No active signal — TP/SL lines will appear when the bot fires on this instrument
+          Awaiting full confluence — D Bias → H1 Sweep → MSS → M5 OB/FVG
         </p>
       )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  SMCPipelineStrip — shows current algorithm stage depth for expanded chart
+//
+//  4 stages in the v3 pipeline:
+//    Stage 1: Daily HTF Bias       (confidence ≥ 34 OR layer1_bias ≠ NEUTRAL)
+//    Stage 2: H1 Liquidity Sweep   (confidence ≥ 67 OR analysis.layer2 === true)
+//    Stage 3: H1 MSS (CHoCH/BOS)   (confidence ≥ 100 OR analysis.layer3 === true)
+//    Stage 4: M5 OB / FVG Entry    (confidence = 100 — only fires with M5 data)
+//
+//  Oanda /markets bulk endpoint: provides only confidence + bias
+//  Bybit  /bybit/market endpoint: provides confidence + layer2 (bool) + layer3 (bool)
+// ─────────────────────────────────────────────────────────────────────────────
+function SMCPipelineStrip({ analysis, accent }) {
+  const conf = analysis?.confidence ?? 0;
+  const bias = analysis?.bias ?? "NEUTRAL";
+
+  // Stage flags — use explicit booleans when available (Bybit), else infer from conf
+  const s1 = conf >= 34  || (bias !== "NEUTRAL" && bias != null);
+  const s2 = analysis?.layer2 === true ? true : conf >= 67;
+  const s3 = analysis?.layer3 === true ? true : conf >= 100;
+  const s4 = conf >= 100;   // only reachable after full M5 confirmation
+
+  const isBull = bias === "BULLISH" || bias === "LONG";
+  const dirColor = s4 ? (isBull ? "#00FF00" : "#FF0000") : accent;
+
+  const stages = [
+    { key: "s1", label: "D Bias",    sublabel: "Daily HTF",  active: s1,  color: "#888888" },
+    { key: "s2", label: "H1 Sweep",  sublabel: "Liq. Hunt",  active: s2,  color: "#00BFFF" },
+    { key: "s3", label: "MSS",       sublabel: "CHoCH/BOS",  active: s3,  color: "#FFB800" },
+    { key: "s4", label: "M5 Zone",   sublabel: "OB / FVG",   active: s4,  color: dirColor  },
+  ];
+
+  return (
+    <div style={{
+      display: "flex", gap: 4, marginBottom: 8, alignItems: "stretch",
+    }}>
+      {stages.map((st, i) => (
+        <div key={st.key} style={{ flex: 1, display: "flex", flexDirection: "column", gap: 3 }}>
+          {/* Connector line between stages */}
+          <div style={{ display: "flex", alignItems: "center", gap: 2 }}>
+            <div style={{
+              flex: 1, height: 2, borderRadius: 1,
+              background: st.active
+                ? `linear-gradient(90deg, ${stages[i-1]?.active ? st.color : "transparent"} 0%, ${st.color} 100%)`
+                : "rgba(255,255,255,0.07)",
+              transition: "background 0.4s",
+            }} />
+            <div style={{
+              width: 7, height: 7, borderRadius: "50%", flexShrink: 0,
+              background: st.active ? st.color : "rgba(255,255,255,0.1)",
+              boxShadow: st.active ? `0 0 6px ${st.color}` : "none",
+              transition: "background 0.4s, box-shadow 0.4s",
+            }} />
+          </div>
+          {/* Stage label */}
+          <div style={{ paddingLeft: 2 }}>
+            <p style={{
+              margin: 0, fontSize: "0.52rem", fontWeight: 700,
+              fontFamily: "'JetBrains Mono', monospace", letterSpacing: "0.06em",
+              color: st.active ? st.color : "rgba(255,255,255,0.15)",
+              transition: "color 0.4s",
+            }}>{st.label}</p>
+            <p style={{
+              margin: 0, fontSize: "0.45rem",
+              fontFamily: "'Inter', sans-serif",
+              color: st.active ? "rgba(255,255,255,0.35)" : "rgba(255,255,255,0.1)",
+              transition: "color 0.4s",
+            }}>{st.sublabel}</p>
+          </div>
+        </div>
+      ))}
     </div>
   );
 }

@@ -19,7 +19,7 @@
  *   • Together these ensure the VERY FIRST React paint uses the correct mode
  */
 import React, { useState, useEffect, useRef } from "react";
-import { AnimatePresence, motion, useMotionValue, useTransform, animate } from "framer-motion";
+import { AnimatePresence, motion }      from "framer-motion";
 import {
   SignedIn,
   SignedOut,
@@ -29,10 +29,10 @@ import MarketsPage   from "./pages/MarketsPage";
 import SignalsPage   from "./pages/SignalsPage";
 import AccountPage   from "./pages/AccountPage";
 import ProfilePage   from "./pages/ProfilePage";
-import TabBar        from "./components/shared/TabBar";
+import TabBar        from "./components/layout/TabBar";
 import { useAuthStore } from "./store/authStore";
 import { useTheme }     from "./hooks/useTheme";
-import { initOneSignal } from "./services/pushNotifications";
+import { usePushNotifications } from "./hooks/usePushNotifications";
 
 const FONT_UI   = "'Inter', sans-serif";
 const FONT_MONO = "'JetBrains Mono', monospace";
@@ -81,151 +81,21 @@ const TABS = [
 // GlobalModeBar height constant
 const BAR_H = 46;
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  Pull-to-Refresh
-//
-//  Touch listeners live on `window` — not on the scrollable div — so they
-//  survive AnimatePresence remounts when appMode changes.  The scrollable div
-//  ref is only used to read scrollTop (decides whether to engage the gesture).
-//
-//  Thresholds
-//    THRESHOLD = 70 px → reload on release
-//    MAX_PULL  = 110 px → rubber-band ceiling
-//
-//  Rubber-band: full speed below threshold, 30 % speed above it.
-//  Release below threshold → spring back via framer-motion animate().
-// ─────────────────────────────────────────────────────────────────────────────
-const PTR_THRESHOLD = 70;
-const PTR_MAX       = 110;
-
-function usePullToRefresh(scrollRef) {
-  const pullY = useMotionValue(0);
-
-  useEffect(() => {
-    let startY  = 0;
-    let pulling = false;
-
-    function onTouchStart(e) {
-      // Only engage when the scrollable container is scrolled to the very top
-      const el = scrollRef.current;
-      if (el && el.scrollTop > 2) return;
-      startY  = e.touches[0].clientY;
-      pulling = false;
-    }
-
-    function onTouchMove(e) {
-      const el    = scrollRef.current;
-      const delta = e.touches[0].clientY - startY;
-
-      // Bail if scrolled down or pulling upward
-      if ((el && el.scrollTop > 2) || delta <= 0) {
-        if (pulling) { pulling = false; pullY.set(0); }
-        return;
-      }
-
-      pulling = true;
-
-      // Rubber-band: full rate below threshold, 30 % above
-      const dist = delta < PTR_THRESHOLD
-        ? delta
-        : PTR_THRESHOLD + (delta - PTR_THRESHOLD) * 0.3;
-
-      pullY.set(Math.min(dist, PTR_MAX));
-
-      // Block browser native pull-to-refresh / scroll bounce
-      e.preventDefault();
-    }
-
-    function onTouchEnd() {
-      if (!pulling) return;
-      pulling = false;
-      if (pullY.get() >= PTR_THRESHOLD) {
-        // Brief pause so the user sees the indicator snap to "ready" state
-        setTimeout(() => window.location.reload(true), 150);
-      } else {
-        animate(pullY, 0, { type: "spring", stiffness: 320, damping: 28 });
-      }
-    }
-
-    // Listeners on window survive AnimatePresence remounts of child divs
-    window.addEventListener("touchstart",  onTouchStart, { passive: true  });
-    window.addEventListener("touchmove",   onTouchMove,  { passive: false }); // passive:false → can preventDefault
-    window.addEventListener("touchend",    onTouchEnd,   { passive: true  });
-    window.addEventListener("touchcancel", onTouchEnd,   { passive: true  });
-
-    return () => {
-      window.removeEventListener("touchstart",  onTouchStart);
-      window.removeEventListener("touchmove",   onTouchMove);
-      window.removeEventListener("touchend",    onTouchEnd);
-      window.removeEventListener("touchcancel", onTouchEnd);
-    };
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps — window is stable
-
-  return pullY;
-}
-
-// ── Pull indicator — pill that peeks out below the GlobalModeBar ──────────────
-function PullIndicator({ pullY, accent }) {
-  // Fade in only in the second half of the pull so it doesn't flash on scroll
-  const opacity  = useTransform(pullY, [0, PTR_THRESHOLD * 0.5, PTR_THRESHOLD], [0, 0, 1]);
-  // Slides down from behind the header as the user pulls
-  const y        = useTransform(pullY, [0, PTR_THRESHOLD], [-20, 6]);
-  // Chevron rotates 180° at threshold (↓ becomes ↑ / "ready" signal)
-  const rotate   = useTransform(pullY, [PTR_THRESHOLD * 0.55, PTR_THRESHOLD], [0, 180]);
-  const scale    = useTransform(pullY, [0, PTR_THRESHOLD], [0.7, 1]);
-
-  return (
-    <motion.div
-      style={{
-        position:       "absolute",
-        top:            `calc(${BAR_H}px + env(safe-area-inset-top, 0px) + 4px)`,
-        left:           "50%",
-        x:              "-50%",   // framer-motion transform — no layout shift
-        opacity,
-        y,
-        scale,
-        zIndex:         58,       // above scanline (50), below GlobalModeBar (60)
-        pointerEvents:  "none",
-        display:        "flex",
-        alignItems:     "center",
-        justifyContent: "center",
-        width:          36,
-        height:         36,
-        borderRadius:   "50%",
-        background:     "rgba(10,10,10,0.85)",
-        border:         "1px solid rgba(255,255,255,0.10)",
-        backdropFilter: "blur(12px)",
-        boxShadow:      `0 0 12px ${accent}30`,
-      }}
-    >
-      <motion.svg
-        style={{ rotate }}
-        width="15" height="15" viewBox="0 0 24 24"
-        fill="none" stroke={accent} strokeWidth="2.5"
-        strokeLinecap="round" strokeLinejoin="round"
-      >
-        {/* Chevron down — rotates to chevron up at threshold */}
-        <polyline points="6 9 12 15 18 9" />
-      </motion.svg>
-    </motion.div>
-  );
-}
-
 // ═════════════════════════════════════════════════════════════════════════════
 export default function App() {
   const [activeTab,  setActiveTab]  = useState("markets");
   const [shifting,   setShifting]   = useState(false);
   const [shiftMode,  setShiftMode]  = useState(null);
-  const prevMode  = React.useRef(null);
-  const scrollRef = useRef(null);   // points at the scrollable content div
-  const pullY     = usePullToRefresh(scrollRef);
+  const prevMode = React.useRef(null);
   const {
     accent, accentHdr, accentDim, accentBdr, scanline, isCrypto, appMode,
   } = useTheme();
 
-  useEffect(() => {
-    initOneSignal().catch(() => {});
-  }, []);
+  // ── Push notifications — fully automatic background registration ────────
+  // usePushNotifications handles SW registration, OS permission prompt,
+  // player ID registration, and background delivery automatically.
+  // No user-gesture "Enable Alerts" button needed.
+  usePushNotifications();
 
   // ── Cinematic Dimension Shift: show overlay when mode changes ─────────────
   useEffect(() => {
@@ -253,7 +123,13 @@ export default function App() {
   return (
     <>
       <SignedOut>
-        <RedirectToSignIn />
+        {/*
+          Redirect unauthenticated users to the Account Portal sign-in page.
+          `signInFallbackRedirectUrl` is the v5 prop (replaces `redirectUrl`).
+          The full absolute URL is required so Clerk's Account Portal knows
+          where to send the user back after they authenticate.
+        */}
+        <RedirectToSignIn signInFallbackRedirectUrl="https://radiant-cloud-v1.vercel.app" />
       </SignedOut>
 
       <SignedIn>
@@ -274,11 +150,6 @@ export default function App() {
             fontFamily: FONT_UI,
           }}
         >
-          {/* ── Pull-to-Refresh indicator ─────────────────────────────── */}
-          {/* Peeks out below the GlobalModeBar as the user drags down.    */}
-          {/* Driven by pullY MotionValue — zero React re-renders.         */}
-          <PullIndicator pullY={pullY} accent={accent} />
-
           {/* ── ① Global Mode Bar ─────────────────────────────────────── */}
           <GlobalModeBar
             isCrypto={isCrypto}
@@ -311,7 +182,6 @@ export default function App() {
           <AnimatePresence mode="wait">
             <motion.div
               key={appMode}
-              ref={scrollRef}
               variants={modeVariants}
               initial="initial"
               animate="animate"

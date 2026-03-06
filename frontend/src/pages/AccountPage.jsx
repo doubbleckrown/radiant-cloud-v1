@@ -14,7 +14,7 @@
  *  • All Bybit requests include X-App-Mode: CRYPTO header.
  *  • normalizeTrade(t, isCrypto, kind) maps both trade shapes to a common schema
  *    so TradeDetailCard has zero mode-specific branches in its render.
- *  • Strict null-checks on every Bybit field to prevent black-screen crashes.
+ *  • Strict null-checks on every Bybit field to prevent black-screen crashes. We trying this
  *
  * Backend routes:
  *   Oanda: GET /api/account, /api/account/trades, /api/account/history
@@ -363,7 +363,9 @@ export default function AccountPage() {
               {isCrypto ? "Bybit Account" : "Account"}
             </h1>
             <p style={{ color: C.label, fontSize: "0.7rem", margin: "2px 0 0", fontFamily: FONT_UI }}>
-              {isCrypto ? "Bybit V5 · Linear Perpetuals" : "Oanda v20 · Live data"}
+              {isCrypto
+                ? "Bybit V5 · Linear Perps · SMC/ICT v3"
+                : "Oanda v20 · SMC/ICT v3 · Daily→H1→M5"}
             </p>
           </div>
 
@@ -1207,10 +1209,10 @@ function normalizeTrade(t, isCrypto, kind) {
       tpUsd:      isHistory ? 0 : tpUsdOanda,
       riskAmt:    isHistory ? Math.abs(financing + commission) : margin,
       riskLabel:  isHistory ? "Fees & Fin." : "Risk Capital",
-      conflTitle: rawUnits > 0 ? "SMC Bullish Order Block" : "SMC Bearish Order Block",
+      conflTitle: rawUnits > 0 ? "SMC Long Setup" : "SMC Short Setup",
       conflSub:   rawUnits > 0
-        ? "Demand Zone · Above 200 EMA · CHoCH confirmed"
-        : "Supply Zone · Below 200 EMA · CHoCH confirmed",
+        ? "Daily Bullish → H1 Liq. Sweep → MSS → M5 OB/FVG"
+        : "Daily Bearish → H1 Liq. Sweep → MSS → M5 OB/FVG",
       openDt:  t.openTime  ? new Date(t.openTime)  : null,
       closeDt: t.closeTime ? new Date(t.closeTime) : null,
       id:      t.id ?? null,
@@ -1246,7 +1248,7 @@ function normalizeTrade(t, isCrypto, kind) {
       tpPx:       0,
       riskAmt:    parseFloat(t.closingFee ?? t.commission ?? 0),
       riskLabel:  "Closing Fee",
-      conflTitle: isLong ? "Bybit Long Position" : "Bybit Short Position",
+      conflTitle: isLong ? "SMC Long · " + sym : "SMC Short · " + sym,
       conflSub:   sym + (isLong ? " · Long · Closed" : " · Short · Closed"),
       openDt:     openMs  > 0 ? new Date(openMs)  : null,
       closeDt:    closeMs > 0 ? new Date(closeMs) : null,
@@ -1282,8 +1284,10 @@ function normalizeTrade(t, isCrypto, kind) {
     tpUsd,
     riskAmt:    posIM > 0 ? posIM : posVal,
     riskLabel:  "Risk Capital",
-    conflTitle: isLong ? "Bybit Long Position" : "Bybit Short Position",
-    conflSub:   sym + (isLong ? " · Long · Live" : " · Short · Live"),
+    conflTitle: isLong ? "SMC Long · " + sym : "SMC Short · " + sym,
+    conflSub:   isLong
+      ? "Daily Bullish → H1 Liq. Sweep → MSS → M5 OB/FVG"
+      : "Daily Bearish → H1 Liq. Sweep → MSS → M5 OB/FVG",
     openDt:     openMs > 0 ? new Date(openMs) : null,
     closeDt:    null,
     id:         t.positionIdx != null ? String(t.positionIdx) : t.symbol ?? null,
@@ -1363,7 +1367,7 @@ function TradeDetailCard({ trade: t, kind, isCrypto = false }) {
               color:       C.amber,
               background:  "rgba(255,184,0,0.1)",
               border:      "1px solid rgba(255,184,0,0.28)", fontFamily: FONT_UI,
-            }}>{isCrypto ? "Bybit" : "SMC/ICT"}</span>
+            }}>SMC/ICT v3</span>
             <span style={{
               padding: "1px 5px", borderRadius: 4, fontSize: "0.52rem",
               fontWeight: 700, letterSpacing: "0.08em",

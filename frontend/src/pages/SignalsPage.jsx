@@ -61,6 +61,33 @@ function fmtAgo(ts) {
   if (s < 3600) return `${Math.floor(s / 60)}m ago`;
   return `${Math.floor(s / 3600)}h ago`;
 }
+// ── SMC v3 layer2 string parsers ─────────────────────────────────────────────
+// layer2 format: "Swept Swing Low @ 1.08234 → MSS 1.08456 → M5 OB [1.08200–1.08234]"
+function parseSweepType(layer2) {
+  if (!layer2) return null;
+  const m = String(layer2).match(/Swept (.+?) @/);
+  return m ? m[1] : null;
+}
+function parseMSSLevel(layer2) {
+  if (!layer2) return null;
+  const parts = String(layer2).split(" → ");
+  const mssPart = parts.find(p => p.trim().startsWith("MSS"));
+  return mssPart ? mssPart.trim() : null;
+}
+function parseZoneType(layer2) {
+  if (!layer2) return null;
+  const parts = String(layer2).split(" → ");
+  const zonePart = parts.find(p => p.includes("M5 OB") || p.includes("M5 FVG")) ?? "";
+  if (zonePart.includes("OB"))  return "OB";
+  if (zonePart.includes("FVG")) return "FVG";
+  return null;
+}
+function parseZoneRange(layer2) {
+  if (!layer2) return null;
+  const m = String(layer2).match(/\[(.+?)\]/);
+  return m ? m[1] : null;
+}
+
 /** Strict dedup key — instrument + direction only (no time bucket). 
  *  Prevents EUR/GBP double-printing when the same signal is pushed via WS
  *  AND fetched via REST in the same polling cycle. */
@@ -353,7 +380,7 @@ export default function SignalsPage() {
             </p>
             <p style={{ color: C.sub, fontSize: "0.72rem", margin: 0 }}>
               {activeTab === "Active"
-                ? "All 3 SMC layers must confirm before the bot fires."
+                ? "Daily Bias → H1 Liq. Sweep → MSS → M5 OB/FVG — all 4 stages required."
                 : "Past signals will appear here after their 2-hour window expires."}
             </p>
           </motion.div>
@@ -472,13 +499,13 @@ function SignalCard({ sig, locked, isActive, isCrypto, accent, accentDim, accent
               background: isLong ? "rgba(0,255,65,0.12)" : "rgba(255,0,0,0.12)",
               border: `1px solid ${dirColor}50`,
               color: dirColor, fontFamily: FONT_MONO,
-              // Spec: true green #00FF00 glow for LONG, true red #FF0000 for SHORT
+              // Spec: true green #00FF00 glow for BULLISH, true red #FF0000 for BEARISH
               textShadow: isLong
                 ? "0 0 12px rgba(0,255,0,0.9)"
                 : "0 0 12px rgba(255,0,0,0.9)",
               filter: `drop-shadow(0 0 8px ${dirColor}bb)`,
             }}>
-              {isLong ? "LONG" : "SHORT"}
+              {isLong ? "BULLISH" : "BEARISH"}
             </span>
             {locked && (
               <span style={{
@@ -526,7 +553,7 @@ function SignalCard({ sig, locked, isActive, isCrypto, accent, accentDim, accent
             {conf}%
           </motion.p>
           <p style={{ color: conf >= 100 ? confColor : C.sub, fontSize: "0.62rem", margin: "2px 0 0", letterSpacing: "0.06em" }}>
-            {conf >= 100 ? "FULL CONF" : conf >= 67 ? "L2 ZONE" : conf >= 34 ? "L1 TREND" : "SCANNING"}
+            {conf >= 100 ? "FULL CONF" : conf >= 67 ? "LIQ SWEPT" : conf >= 34 ? "D BIAS" : "SCANNING"}
           </p>
         </div>
 
@@ -567,11 +594,60 @@ function SignalCard({ sig, locked, isActive, isCrypto, accent, accentDim, accent
             style={{ overflow: "hidden" }}
           >
             <div style={{ padding: "14px 16px", borderTop: `1px solid ${C.cardBdr}` }}>
-              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
-                <LayerBadge label="L1 Trend" active={!!sig.layer1} value={sig.layer1}          accent={accent} isLong={isLong} />
-                <LayerBadge label="L2 Zone"  active={!!sig.layer2} value={sig.layer2 ? "OB/FVG" : null} accent={accent} isLong={isLong} />
-                <LayerBadge label="L3 MSS"   active={!!sig.layer3} value={sig.layer3 ? "CHoCH" : null} accent={accent} isLong={isLong} />
+              {/* ── Stage badges ────────────────────────────────────────────── */}
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
+                {/* Stage 1 — Daily HTF Bias */}
+                <LayerBadge
+                  label="D BIAS"
+                  active={!!sig.layer1}
+                  value={sig.layer1 ?? null}
+                  accent={accent} isLong={isLong}
+                />
+                {/* Stage 2 — H1 Liquidity Sweep */}
+                <LayerBadge
+                  label="H1 SWEEP"
+                  active={!!sig.layer2}
+                  value={parseSweepType(sig.layer2)}
+                  accent={accent} isLong={isLong}
+                />
+                {/* Stage 3+4 — H1 MSS + M5 OB/FVG */}
+                <LayerBadge
+                  label="MSS+ZONE"
+                  active={!!sig.layer3}
+                  value={sig.layer3 ? (parseZoneType(sig.layer2) ? `${parseZoneType(sig.layer2)} · CHoCH` : "CHoCH") : null}
+                  accent={accent} isLong={isLong}
+                />
+                {/* P/D Zone — ICT premium/discount filter */}
+                {sig.pd_zone && sig.pd_zone !== "UNKNOWN" && (
+                  <PDZoneBadge zone={sig.pd_zone} isLong={isLong} />
+                )}
               </div>
+
+              {/* ── Algorithm stage breakdown ──────────────────────────────── */}
+              {sig.layer2 && (
+                <div style={{
+                  padding: "10px 12px", borderRadius: 10, marginBottom: 8,
+                  background: "rgba(255,255,255,0.02)",
+                  border: `1px solid rgba(255,255,255,0.06)`,
+                  display: "flex", flexDirection: "column", gap: 5,
+                }}>
+                  {parseSweepType(sig.layer2) && (
+                    <AlgoRow icon="💧" label="Sweep" value={`${parseSweepType(sig.layer2)}`} color={isLong ? "#00BFFF" : "#FF6B6B"} />
+                  )}
+                  {parseMSSLevel(sig.layer2) && (
+                    <AlgoRow icon="⚡" label="Structure Shift" value={parseMSSLevel(sig.layer2)} color="#FFB800" />
+                  )}
+                  {parseZoneType(sig.layer2) && (
+                    <AlgoRow
+                      icon={parseZoneType(sig.layer2) === "OB" ? "🧱" : "🌊"}
+                      label={`M5 ${parseZoneType(sig.layer2) === "OB" ? "Order Block" : "Fair Value Gap"}`}
+                      value={parseZoneRange(sig.layer2) ?? ""}
+                      color={isLong ? "#00FF41" : "#FF3B3B"}
+                    />
+                  )}
+                </div>
+              )}
+
               <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                 <DetailRow label="Breakeven"   value={fmtPrice(sig.breakeven, dp)} mono />
                 <DetailRow label="Risk/Reward" value={`1 : ${sig.rr ?? "3.0"}`} mono />
@@ -603,21 +679,82 @@ function SignalCard({ sig, locked, isActive, isCrypto, accent, accentDim, accent
   );
 }
 
-// ── Layer color map: L1=grey, L2=amber, L3=accent (per direction) ───────────
+// ── Layer color map — SMC v3 stage names ─────────────────────────────────────
+// Stage 1: Daily Bias     → grey  (structural context)
+// Stage 2: H1 Liq. Sweep  → blue  (liquidity event)
+// Stage 3+4: MSS + Zone   → directional (green long / red short)
 const LAYER_COLORS = {
-  "L1 Trend": { active: "#888888", glow: "rgba(136,136,136,0.4)" },
-  "L2 Zone":  { active: "#FFB800", glow: "rgba(255,184,0,0.5)"   },
-  "L3 MSS":   { active: "#00FF41", glow: "rgba(0,255,65,0.6)"    },
+  "D BIAS":   { active: "#888888", glow: "rgba(136,136,136,0.4)" },
+  "H1 SWEEP": { active: "#00BFFF", glow: "rgba(0,191,255,0.5)"   },
+  "MSS+ZONE": { active: "#00FF41", glow: "rgba(0,255,65,0.6)"    },
 };
+
+// ── Premium/Discount zone badge ──────────────────────────────────────────────
+// Shows the ICT P/D classification: PREMIUM (sell zone), DISCOUNT (buy zone),
+// EQUILIBRIUM (neutral). Aligned = signal direction matches zone correctly.
+function PDZoneBadge({ zone, isLong }) {
+  const aligned =
+    (isLong  && (zone === "DISCOUNT"    || zone === "EQUILIBRIUM")) ||
+    (!isLong && (zone === "PREMIUM"     || zone === "EQUILIBRIUM"));
+
+  const color = zone === "EQUILIBRIUM"
+    ? "#FFB800"
+    : aligned
+    ? (isLong ? "#00FF41" : "#FF3B3B")
+    : "#666666";
+
+  const icon = zone === "PREMIUM" ? "▲" : zone === "DISCOUNT" ? "▼" : "≈";
+
+  return (
+    <div style={{
+      display: "flex", alignItems: "center", gap: 5,
+      padding: "4px 10px", borderRadius: 8,
+      background: `${color}10`,
+      border: `1px solid ${color}35`,
+    }}>
+      <span style={{ fontSize: "0.58rem", lineHeight: 1 }}>{icon}</span>
+      <span style={{
+        color,
+        fontSize: "0.6rem", fontWeight: 700,
+        fontFamily: "'JetBrains Mono', monospace", letterSpacing: "0.06em",
+      }}>
+        {zone}
+      </span>
+    </div>
+  );
+}
+
+// ── Algorithm stage breakdown row ─────────────────────────────────────────────
+function AlgoRow({ icon, label, value, color }) {
+  return (
+    <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
+      <span style={{ fontSize: "0.65rem", flexShrink: 0 }}>{icon}</span>
+      <span style={{ color: "#555", fontSize: "0.6rem", fontFamily: "'Inter', sans-serif", flexShrink: 0, minWidth: 90 }}>
+        {label}
+      </span>
+      <span style={{
+        color, fontSize: "0.65rem", fontWeight: 600,
+        fontFamily: "'JetBrains Mono', monospace",
+        overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+      }}>
+        {value}
+      </span>
+    </div>
+  );
+}
 
 function LayerBadge({ label, active, value, accent, isLong }) {
   // Use per-layer color when active; grey when inactive
   const layerColor = LAYER_COLORS[label];
-  const activeColor = label === "L3 MSS"
-    ? (isLong ? "#00FF00" : "#FF0000")   // L3 uses direction color
+  const activeColor = label === "MSS+ZONE"
+    ? (isLong ? "#00FF00" : "#FF0000")   // MSS+ZONE uses direction color
+    : label === "H1 SWEEP"
+    ? "#00BFFF"
     : (layerColor?.active ?? accent);
-  const glowColor   = label === "L3 MSS"
+  const glowColor   = label === "MSS+ZONE"
     ? (isLong ? "rgba(0,255,0,0.6)" : "rgba(255,0,0,0.6)")
+    : label === "H1 SWEEP"
+    ? "rgba(0,191,255,0.5)"
     : (layerColor?.glow ?? "transparent");
   return (
     <div style={{
@@ -625,7 +762,7 @@ function LayerBadge({ label, active, value, accent, isLong }) {
       padding: "4px 10px", borderRadius: 8,
       background: active ? `${activeColor}12` : "rgba(255,255,255,0.03)",
       border: `1px solid ${active ? `${activeColor}40` : C.cardBdr}`,
-      filter: active && label === "L3 MSS" ? `drop-shadow(0 0 4px ${glowColor})` : "none",
+      filter: active && (label === "MSS+ZONE" || label === "H1 SWEEP") ? `drop-shadow(0 0 4px ${glowColor})` : "none",
     }}>
       <div style={{
         width: 6, height: 6, borderRadius: "50%",
