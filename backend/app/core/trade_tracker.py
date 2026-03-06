@@ -65,9 +65,17 @@ class TradeTracker:
         return self._locks.get(symbol) if self.is_locked(symbol) else None
 
     def all_locks(self) -> dict[str, dict]:
-        stale = [s for s, l in self._locks.items() if time.time() > l["expires_at"]]
-        for s in stale:
-            del self._locks[s]
+        """
+        Return ALL active locks — including TTL-expired ones.
+
+        Do NOT prune expired locks here.  The exit_monitor_loop in watcher.py
+        must see expired locks so it can call the broker close API before
+        unlocking.  Pruning them here means the watcher never fires the close
+        call, leaving real open positions on the exchange with no exit order.
+
+        Stale locks that were never traded (e.g. pending orders that timed out
+        without a fill) are cleaned up by is_locked() on the next signal check.
+        """
         return dict(self._locks)
 
 

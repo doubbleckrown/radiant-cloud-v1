@@ -20,7 +20,7 @@
  *   Oanda: GET /api/account, /api/account/trades, /api/account/history
  *   Bybit: GET /api/bybit/account, /api/bybit/account/positions, /api/bybit/account/history
  */
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { motion, AnimatePresence }           from "framer-motion";
 import api                                   from "../utils/api";
 import { useAuthStore }                      from "../store/authStore";

@@ -131,13 +131,13 @@ async def exit_monitor_loop() -> None:
                 is_bybit  = symbol.endswith("USDT")
 
                 price = (state.bybit_prices if is_bybit else state.latest_prices).get(symbol, 0.0)
-                if price <= 0:
-                    continue
 
                 sym_label = symbol.replace("_", "/").replace("USDT", "/USDT")
                 dp        = 4 if is_bybit else 5
 
                 # ── 1. TTL ────────────────────────────────────────────────
+                # Check TTL FIRST and independently of price — a position
+                # must be force-closed after 2h even if the price feed is stale.
                 age_s = now - opened_at
                 if age_s >= TRADE_LOCK_TTL_SECONDS:
                     reason = f"TTL (2h expired; age={int(age_s)}s)"
@@ -151,6 +151,11 @@ async def exit_monitor_loop() -> None:
                         f"⏱ 2h Timer Expired. {sym_label} closed at Market Price.",
                         {"instrument": symbol, "price": round(price, dp), "age_s": int(age_s)},
                     ))
+                    continue
+
+                # Price-based exits require a live price — skip if feed is stale
+                if price <= 0:
+                    logger.debug("[EXIT] %s — no live price, skipping TP/SL check", symbol)
                     continue
 
                 # ── 2. Take-Profit ────────────────────────────────────────
