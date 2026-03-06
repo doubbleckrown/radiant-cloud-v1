@@ -1,5 +1,6 @@
 """app/routes/routes_account.py — Oanda + Bybit account, trade, close endpoints."""
 from __future__ import annotations
+import logging
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -7,6 +8,7 @@ from app.core.auth import get_current_user
 from app.core.config import get_oanda_creds, get_bybit_creds
 from app.core.trade_tracker import trade_tracker
 
+logger = logging.getLogger("fx-signal")
 router = APIRouter()
 
 
@@ -35,6 +37,7 @@ async def oanda_open_trades(payload: dict = Depends(get_current_user)):
     try:
         return await fetch_open_trades(*creds)
     except Exception as e:
+        logger.error("/api/account/trades failed: %s", e, exc_info=True)
         raise HTTPException(503, f"Oanda error: {e}")
 
 

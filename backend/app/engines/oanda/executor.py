@@ -21,7 +21,7 @@ from app.core.config import (
 from app.core.trade_tracker import trade_tracker
 from app.core.alerts import push_notification
 from app.services.strategy import Candle, TradeSignal
-from app.engines.sl_tp import candle_anchor_levels, oanda_units
+from app.engines.sl_tp import candle_anchor_levels, oanda_units, _pip_value_usd, _get_class as _sltp_get_class
 import app.core.state as state
 
 logger = logging.getLogger("fx-signal")
@@ -74,7 +74,7 @@ async def fetch_open_trades(api_key: str, account_id: str) -> list:
     trades = r.json().get("trades", [])
 
     # Lazy import to avoid circular dependency (sl_tp imports strategy, not executor)
-    from app.engines.sl_tp import _pip_value_usd, _get_class as _sltp_class
+    # NOTE: _pip_value_usd and _sltp_get_class are now imported at module level above.
 
     # Aggregate all trades per instrument into a net position
     agg: dict[str, dict] = {}
@@ -135,13 +135,11 @@ async def fetch_open_trades(api_key: str, account_id: str) -> list:
         del a["_price_den"]
 
         # ── Dollar amounts for the UI ─────────────────────────────────────────
-        # Uses the same pip-value logic as oanda_units() so the figures are
-        # consistent with how the bot sized the position.
         abs_units = abs(a["currentUnits"])
         sl_px     = a.get("stopLossPrice",   0.0)
         tp_px     = a.get("takeProfitPrice", 0.0)
         try:
-            cfg      = _sltp_class(ins, is_bybit=False)
+            cfg      = _sltp_get_class(ins, is_bybit=False)
             pip_sz   = cfg.pip_size
             pip_val  = _pip_value_usd(ins, entry) if entry > 0 else 0.0
             if pip_sz > 0 and pip_val > 0 and entry > 0:
@@ -149,7 +147,8 @@ async def fetch_open_trades(api_key: str, account_id: str) -> list:
                 tp_usd = round(abs(tp_px - entry) / pip_sz * pip_val * abs_units, 2) if tp_px else 0.0
             else:
                 sl_usd = tp_usd = 0.0
-        except Exception:
+        except Exception as enrich_exc:
+            logger.warning("fetch_open_trades: dollar enrichment failed for %s: %s", ins, enrich_exc)
             sl_usd = tp_usd = 0.0
         a["slAmountUSD"] = sl_usd
         a["tpAmountUSD"] = tp_usd
