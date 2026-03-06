@@ -24,6 +24,7 @@ import {
   SignedIn,
   SignedOut,
   RedirectToSignIn,
+  useAuth,
 } from "@clerk/clerk-react";
 import MarketsPage   from "./pages/MarketsPage";
 import SignalsPage   from "./pages/SignalsPage";
@@ -83,6 +84,16 @@ const BAR_H = 46;
 
 // ═════════════════════════════════════════════════════════════════════════════
 export default function App() {
+  const { isLoaded } = useAuth();
+  const [clerkTimedOut, setClerkTimedOut] = useState(false);
+
+  // If Clerk hasn't resolved within 10 seconds, surface the reload button
+  useEffect(() => {
+    if (isLoaded) return;
+    const t = setTimeout(() => setClerkTimedOut(true), 10_000);
+    return () => clearTimeout(t);
+  }, [isLoaded]);
+
   const [activeTab,  setActiveTab]  = useState("markets");
   const [shifting,   setShifting]   = useState(false);
   const [shiftMode,  setShiftMode]  = useState(null);
@@ -110,6 +121,13 @@ export default function App() {
     const t = setTimeout(() => setShifting(false), 1200);
     return () => clearTimeout(t);
   }, [isCrypto]);
+
+  // ── Blank-screen guard — AFTER all hooks ─────────────────────────────────
+  // isLoaded=false means Clerk hasn't resolved the session yet.
+  // We wait up to 10 s, then surface the Refresh button.
+  if (!isLoaded) {
+    return <ClerkGate timedOut={clerkTimedOut} />;
+  }
 
   const Page = {
     markets: MarketsPage,
@@ -241,6 +259,129 @@ export default function App() {
         </AnimatePresence>
       </SignedIn>
     </>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  ClerkGate — shown while Clerk's session is resolving (or has stalled).
+//
+//  Two states:
+//    loading  — spinner + subtle "Connecting…" message (first 10 s)
+//    timedOut — spinner replaced with a hard ⟳ Refresh button that calls
+//               window.location.reload() to force a clean session re-sync.
+//
+//  The refresh button is the fix for the blank screen on session sync failure.
+// ─────────────────────────────────────────────────────────────────────────────
+function ClerkGate({ timedOut }) {
+  return (
+    <div style={{
+      position:        "fixed",
+      inset:           0,
+      background:      "#050505",
+      display:         "flex",
+      flexDirection:   "column",
+      alignItems:      "center",
+      justifyContent:  "center",
+      gap:             24,
+      fontFamily:      "'Inter', sans-serif",
+    }}>
+      {/* Brand wordmark */}
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+        <div style={{
+          width: 8, height: 8, borderRadius: "50%",
+          background: "#00FF41",
+          boxShadow:  "0 0 10px #00FF41",
+        }} />
+        <span style={{
+          color:         "#00FF41",
+          fontSize:      "0.75rem",
+          fontWeight:    800,
+          letterSpacing: "0.12em",
+          fontFamily:    "'JetBrains Mono', monospace",
+          textShadow:    "0 0 10px #00FF4150",
+        }}>
+          FX RADIANT
+        </span>
+      </div>
+
+      {timedOut ? (
+        /* ── Session sync stalled — show reload button ── */
+        <>
+          <p style={{
+            color:         "rgba(255,255,255,0.35)",
+            fontSize:      "0.72rem",
+            margin:        0,
+            letterSpacing: "0.04em",
+            textAlign:     "center",
+            maxWidth:      220,
+            lineHeight:    1.5,
+          }}>
+            Session sync timed out.
+          </p>
+          <button
+            onClick={() => window.location.reload()}
+            style={{
+              display:       "flex",
+              alignItems:    "center",
+              gap:           8,
+              padding:       "11px 28px",
+              borderRadius:  12,
+              border:        "1px solid rgba(0,255,65,0.35)",
+              background:    "rgba(0,255,65,0.08)",
+              color:         "#00FF41",
+              fontSize:      "0.75rem",
+              fontWeight:    700,
+              fontFamily:    "'JetBrains Mono', monospace",
+              letterSpacing: "0.1em",
+              cursor:        "pointer",
+              boxShadow:     "0 0 20px rgba(0,255,65,0.12)",
+            }}
+          >
+            {/* Refresh icon */}
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+              stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+              <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+              <path d="M3 3v5h5" />
+            </svg>
+            REFRESH
+          </button>
+          <p style={{
+            color:         "rgba(255,255,255,0.18)",
+            fontSize:      "0.58rem",
+            margin:        0,
+            letterSpacing: "0.06em",
+            fontFamily:    "'JetBrains Mono', monospace",
+          }}>
+            forces a clean session re-sync
+          </p>
+        </>
+      ) : (
+        /* ── Still loading — spinner ── */
+        <>
+          <motion.div
+            animate={{ rotate: 360 }}
+            transition={{ duration: 1, repeat: Infinity, ease: "linear" }}
+            style={{
+              width:        28,
+              height:       28,
+              borderRadius: "50%",
+              border:       "2px solid transparent",
+              borderTopColor:   "#00FF41",
+              borderRightColor: "rgba(0,255,65,0.25)",
+            }}
+          />
+          <p style={{
+            color:         "rgba(255,255,255,0.25)",
+            fontSize:      "0.65rem",
+            margin:        0,
+            letterSpacing: "0.08em",
+            fontFamily:    "'JetBrains Mono', monospace",
+          }}>
+            CONNECTING…
+          </p>
+        </>
+      )}
+    </div>
   );
 }
 

@@ -88,8 +88,8 @@ const BYBIT_META = {
 };
 const BYBIT_CATEGORIES = ["All", "L1", "DeFi", "Payments", "Exchange", "Meme"];
 
-// Bybit V5 interval strings
-const BYBIT_INTERVAL = { M1: "1", M5: "5", M15: "15", H1: "60" };
+// Bybit V5 interval strings — must match BYBIT_INTERVALS in backend config.py
+const BYBIT_INTERVAL = { M1: "1", M5: "5", M15: "15", H1: "60", D: "D" };
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Main component
@@ -115,7 +115,15 @@ export default function MarketsPage() {
   // ── Shared UI state ──────────────────────────────────────────────────────
   const [selectedInstrument, setSelectedInstrument] = useState(null);
   const [granularity,        setGranularity]        = useState("H1");
-  const prevPricesRef = useRef({});
+  const prevPricesRef  = useRef({});   // Oanda WS ticks only
+  const bybitPrevRef   = useRef({});   // Bybit REST poll — isolated, never cleared
+
+  // ── Pull-to-refresh state ─────────────────────────────────────────────────
+  const [isRefreshing,  setIsRefreshing]  = useState(false);
+  const [pullProgress,  setPullProgress]  = useState(0);   // 0–1
+  const ptrTouchStartY = useRef(0);
+  const ptrIsPulling   = useRef(false);
+  const PTR_THRESHOLD  = 64;   // px of drag needed to trigger refresh
 
   // ── Signal levels (for TP/SL chart lines) ────────────────────────────────
   // Keyed by instrument/symbol → most recent signal object
@@ -193,12 +201,12 @@ export default function MarketsPage() {
       for (const item of (data ?? [])) {
         const sym = item.symbol;
         if (!sym) continue;
-        const prev = prevPricesRef.current[sym];
+        const prev = bybitPrevRef.current[sym];        // ← isolated Bybit ref
         if (prev !== undefined && item.price !== prev) {
           setBybitFlicker(f => ({ ...f, [sym]: item.price > prev ? "up" : "down" }));
           setTimeout(() => setBybitFlicker(f => ({ ...f, [sym]: null })), 600);
         }
-        prevPricesRef.current[sym] = item.price;
+        bybitPrevRef.current[sym] = item.price;        // ← never cleared on mode switch
         priceMap[sym]    = item.price;
         analysisMap[sym] = item;
         metaMap[sym]     = { high24h: item.high24h, low24h: item.low24h, volume24h: item.volume24h, change24h: item.change24h };
@@ -218,7 +226,8 @@ export default function MarketsPage() {
 
   useEffect(() => {
     if (!isCrypto) return;
-    prevPricesRef.current = {};
+    // bybitPrevRef is NOT cleared here — it accumulates across polls and
+    // mode switches so flicker fires correctly from the very second poll.
     fetchBybitMarket();
     const id = setInterval(fetchBybitMarket, 30_000);
     return () => clearInterval(id);
@@ -235,6 +244,40 @@ export default function MarketsPage() {
     const existingPrices = isCrypto ? bybitPrices : prices;
     prevPricesRef.current = { ...existingPrices };
   }, [isCrypto]);   // intentionally omit bybitPrices/prices from deps — this is a one-shot seed
+
+  // ── Pull-to-refresh handlers ─────────────────────────────────────────────
+  const handleTouchStart = useCallback((e) => {
+    // Only start PTR tracking when the page is scrolled to the very top
+    if (window.scrollY > 4) return;
+    ptrTouchStartY.current = e.touches[0].clientY;
+    ptrIsPulling.current   = true;
+  }, []);
+
+  const handleTouchMove = useCallback((e) => {
+    if (!ptrIsPulling.current) return;
+    const dy = e.touches[0].clientY - ptrTouchStartY.current;
+    if (dy <= 0) { setPullProgress(0); return; }
+    const progress = Math.min(dy / PTR_THRESHOLD, 1);
+    setPullProgress(progress);
+    // Once dragging, stop native scroll so the PTR indicator can animate
+    if (dy > 8) e.preventDefault();
+  }, []);
+
+  const handleTouchEnd = useCallback(async () => {
+    if (!ptrIsPulling.current) return;
+    ptrIsPulling.current = false;
+    if (pullProgress >= 1) {
+      setPullProgress(0);
+      setIsRefreshing(true);
+      try {
+        await (isCrypto ? fetchBybitMarket() : fetchOandaAnalysis());
+      } finally {
+        setIsRefreshing(false);
+      }
+    } else {
+      setPullProgress(0);
+    }
+  }, [pullProgress, isCrypto, fetchBybitMarket, fetchOandaAnalysis]);
 
   // ── Active meta / categories / prices depending on mode ──────────────────
   const activeMeta       = isCrypto ? BYBIT_META       : OANDA_META;
@@ -255,7 +298,12 @@ export default function MarketsPage() {
   const liveCount = filteredInstruments.filter(k => (activePrices[k] ?? 0) > 0).length;
 
   return (
-    <div style={{ fontFamily: FONT_UI, color: C.white, minHeight: "100%" }}>
+    <div
+      style={{ fontFamily: FONT_UI, color: C.white, minHeight: "100%" }}
+      onTouchStart={handleTouchStart}
+      onTouchMove={handleTouchMove}
+      onTouchEnd={handleTouchEnd}
+    >
 
       {/* ── Sticky header ───────────────────────────────────────────────── */}
       <div style={{
@@ -300,6 +348,44 @@ export default function MarketsPage() {
         </div>
         <div style={{ height: 8 }} />
       </div>
+
+      {/* ── Pull-to-refresh indicator ──────────────────────────────────────── */}
+      {(pullProgress > 0 || isRefreshing) && (
+        <div style={{
+          display: "flex", justifyContent: "center", alignItems: "center",
+          height: isRefreshing ? 40 : Math.round(pullProgress * 40),
+          overflow: "hidden",
+          transition: isRefreshing ? "none" : "height 0.1s",
+        }}>
+          {isRefreshing ? (
+            <motion.div
+              animate={{ rotate: 360 }}
+              transition={{ duration: 0.7, repeat: Infinity, ease: "linear" }}
+              style={{
+                width: 18, height: 18, borderRadius: "50%",
+                border: "2px solid transparent",
+                borderTopColor: accent,
+                borderRightColor: `${accent}40`,
+              }}
+            />
+          ) : (
+            <div style={{
+              width: 18, height: 18, borderRadius: "50%",
+              border: `2px solid ${accent}`,
+              opacity: pullProgress,
+              transform: `rotate(${Math.round(pullProgress * 180)}deg)`,
+              display: "flex", alignItems: "center", justifyContent: "center",
+            }}>
+              <div style={{
+                width: 0, height: 0,
+                borderLeft: "4px solid transparent",
+                borderRight: "4px solid transparent",
+                borderTop: `5px solid ${accent}`,
+              }} />
+            </div>
+          )}
+        </div>
+      )}
 
       {/* ── Instrument list ─────────────────────────────────────────────── */}
       <div style={{ padding: "8px 16px 16px", display: "flex", flexDirection: "column", gap: 2 }}>
@@ -408,7 +494,7 @@ export default function MarketsPage() {
                   </p>
                   <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                     <span style={{ color: C.sub, fontSize: "0.6rem" }}>{meta.category}</span>
-                    {conf > 0 && (
+                    {state != null && (
                       <ConfBadge conf={conf} bias={bias} accent={accent} />
                     )}
                   </div>
@@ -495,13 +581,14 @@ function ConfBadge({ conf, bias, accent }) {
     : null;
 
   // Stage sublabel — shown below the confidence number
-  const stageLabel = conf >= 100
-    ? "FULL CONF"
-    : conf >= 67
-    ? "LIQ SWEPT"
-    : conf >= 34
-    ? "D BIAS"
+  // conf=0 → SCANNING state (daily candles still warming)
+  const isScanning = conf === 0;
+  const stageLabel = conf >= 100 ? "FULL CONF"
+    : conf >= 67  ? "LIQ SWEPT"
+    : conf >= 34  ? "D BIAS"
     : "";
+
+  const displayColor = isScanning ? "rgba(255,255,255,0.18)" : labelColor;
 
   return (
     <span style={{
@@ -513,21 +600,26 @@ function ConfBadge({ conf, bias, accent }) {
       fontWeight:    700,
       padding:       "2px 7px",
       borderRadius:  5,
-      background:    `${labelColor}12`,
-      border:        `1px solid ${labelColor}30`,
-      color:         labelColor,
+      background:    isScanning ? "rgba(255,255,255,0.04)" : `${labelColor}12`,
+      border:        `1px solid ${isScanning ? "rgba(255,255,255,0.1)" : labelColor + "30"}`,
+      color:         displayColor,
       fontFamily:    FONT_MONO,
       letterSpacing: "0.06em",
-      textShadow:    glowColor ? `0 0 10px ${glowColor}` : "none",
-      filter:        conf >= 67 ? `drop-shadow(0 0 6px ${labelColor}99)` : "none",
+      textShadow:    (!isScanning && glowColor) ? `0 0 10px ${glowColor}` : "none",
+      filter:        (!isScanning && conf >= 67) ? `drop-shadow(0 0 6px ${labelColor}99)` : "none",
       lineHeight:    1.2,
     }}>
-      <span>{conf}% {biasLabel}</span>
-      {stageLabel && (
-        <span style={{ fontSize: "0.45rem", opacity: 0.7, letterSpacing: "0.1em" }}>
-          {stageLabel}
-        </span>
-      )}
+      {isScanning
+        ? <span>SCANNING</span>
+        : <>
+            <span>{conf}% {biasLabel}</span>
+            {stageLabel && (
+              <span style={{ fontSize: "0.45rem", opacity: 0.7, letterSpacing: "0.1em" }}>
+                {stageLabel}
+              </span>
+            )}
+          </>
+      }
     </span>
   );
 }
@@ -552,8 +644,8 @@ function InlineChart({ instrument, isCrypto, granularity, setGranularity, accent
   const [loading, setLoading] = useState(true);
   const [error,   setError]   = useState(null);
 
-  const OANDA_GRAN  = ["M1", "M5", "M15", "H1"];
-  const BYBIT_GRAN  = ["M1", "M5", "M15", "H1"];
+  const OANDA_GRAN  = ["M1", "M5", "M15", "H1", "D"];
+  const BYBIT_GRAN  = ["M1", "M5", "M15", "H1", "D"];
   const grans       = isCrypto ? BYBIT_GRAN : OANDA_GRAN;
 
   // ── Chart initialisation (once per mount) ─────────────────────────────────
@@ -593,9 +685,11 @@ function InlineChart({ instrument, isCrypto, granularity, setGranularity, accent
     setError(null);
 
     const bybitInterval = BYBIT_INTERVAL[granularity] ?? "60";
+    const isDaily  = granularity === "D";
+    const barCount = isDaily ? 90 : 120;   // 90 daily bars ≈ 3 months context
     const endpoint = isCrypto
-      ? `/bybit/candles/${instrument}?interval=${bybitInterval}&limit=120`
-      : `/markets/${instrument}/candles?granularity=${granularity}&count=120`;
+      ? `/bybit/candles/${instrument}?interval=${bybitInterval}&limit=${barCount}`
+      : `/markets/${instrument}/candles?granularity=${granularity}&count=${barCount}`;
 
     api.get(endpoint)
       .then(({ data }) => {
