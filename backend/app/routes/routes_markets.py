@@ -20,8 +20,9 @@ async def get_markets(_: dict = Depends(get_current_user)):
         price      = state.latest_prices.get(ins, 0.0)
         daily_open = state.oanda_daily_open.get(ins, 0.0)
         h1         = state.candle_cache[ins]["H1"]
+        candles_d  = state.candle_cache[ins].get("D", [])
         engine     = state.oanda_engines[ins]
-        smc        = engine.get_partial_state(h1, price) if len(h1) >= 210 else None
+        smc        = engine.get_partial_state(candles_d, h1, price) if len(h1) >= 100 else None
         change24h  = round((price - daily_open) / daily_open * 100, 2) if price > 0 and daily_open > 0 else None
         result.append({
             "instrument": ins, "price": price, "change24h": change24h,
@@ -45,9 +46,10 @@ async def get_candles(instrument: str, granularity: str = "H1", count: int = 120
 async def get_analysis(instrument: str, _: dict = Depends(get_current_user)):
     if instrument not in state.oanda_engines:
         raise HTTPException(404, "Instrument not found")
-    price = state.latest_prices.get(instrument, 0.0)
-    h1    = state.candle_cache[instrument]["H1"]
-    smc   = state.oanda_engines[instrument].get_partial_state(h1, price) if len(h1) >= 210 else None
+    price     = state.latest_prices.get(instrument, 0.0)
+    h1        = state.candle_cache[instrument]["H1"]
+    candles_d = state.candle_cache[instrument].get("D", [])
+    smc       = state.oanda_engines[instrument].get_partial_state(candles_d, h1, price) if len(h1) >= 100 else None
     if not smc:
         return {"confidence": 0}
     return {
@@ -63,9 +65,10 @@ async def bybit_market(_: dict = Depends(get_current_user)):
     result = []
     for sym in BYBIT_SYMBOLS:
         price = state.bybit_prices.get(sym, 0.0)
-        h1    = state.bybit_candle_cache[sym]["60"]
-        meta  = state.bybit_meta.get(sym, {})
-        smc   = state.bybit_engines[sym].get_partial_state(h1, price) if (price and len(h1) >= 60) else None
+        h1        = state.bybit_candle_cache[sym]["60"]
+        candles_d = state.bybit_candle_cache[sym].get("D", [])
+        meta      = state.bybit_meta.get(sym, {})
+        smc       = state.bybit_engines[sym].get_partial_state(candles_d, h1, price) if (price and len(h1) >= 60) else None
         result.append({
             "symbol": sym, "price": price,
             "confidence": smc.confidence        if smc else 0,

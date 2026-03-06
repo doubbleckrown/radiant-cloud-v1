@@ -23,7 +23,7 @@ INSTRUMENTS: list[str] = [
     "XAU_USD","XAG_USD","XPT_USD",
     "NAS100_USD","SPX500_USD","US30_USD",
 ]
-GRANULARITIES: list[str] = ["M1", "M5", "M15", "H1"]
+GRANULARITIES: list[str] = ["M1", "M5", "M15", "H1", "D"]
 OANDA_MIN_UNITS: dict[str, int] = {
     "XAU_USD":1,"XAG_USD":1,"XPT_USD":1,
     "NAS100_USD":1,"SPX500_USD":1,"US30_USD":1,
@@ -79,7 +79,7 @@ BYBIT_QTY_STEP: dict[str, float] = {
     "WLFIUSDT":      10.0,    # 0 dp  (multiples of 10)
 }
 
-BYBIT_INTERVALS: list[str] = ["60", "15", "5", "1"]
+BYBIT_INTERVALS: list[str] = ["D", "60", "15", "5", "1"]
 
 CLERK_JWKS_URL = os.getenv("CLERK_JWKS_URL","https://immune-donkey-10.clerk.accounts.dev/.well-known/jwks.json")
 ONESIGNAL_APP_ID   = os.getenv("ONESIGNAL_APP_ID",  "")
