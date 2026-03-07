@@ -135,6 +135,7 @@ export default function App() {
   const indicatorOpacity  = useTransform(springY, [0, 30, TRIGGER], [0, 0.5, 1]);
   const indicatorScale    = useTransform(springY, [0, TRIGGER], [0.5, 1]);
   const indicatorRotation = useTransform(springY, [0, CAP], [0, 180]);
+  const indicatorY        = useTransform(springY, [0, CAP], [-40, 0]);
   const isPullingRef      = useRef(false); // whether pan started at scrollTop=0
 
   const handlePanStart = () => {
@@ -234,7 +235,7 @@ export default function App() {
               zIndex:          30,
               pointerEvents:   "none",
               opacity:         indicatorOpacity,
-              y:               useTransform(springY, [0, CAP], [-40, 0]),
+              y:               indicatorY,
             }}
           >
             <motion.div
