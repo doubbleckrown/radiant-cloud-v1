@@ -4,7 +4,6 @@
 
 @layer base {
   html {
-    overscroll-behavior: none;
     overflow-y: auto !important;
     height: 100%;
   }
