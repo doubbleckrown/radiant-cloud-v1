@@ -135,8 +135,9 @@ export default function App() {
   //   • touchstart  — record start Y; check scrollTop === 0 (gate)
   //   • touchmove   — non-passive so preventDefault() works; drive pullY
   //   • touchend    — trigger reload or snap back
-  //   • outerRef    — attached to the outer wrapper div (replaces onPan* props)
-  //   • scrollContainerRef — still needed to check scrollTop
+  //   • scrollContainerRef — listeners live HERE so preventDefault() fires at
+  //                           the event target, not after the scroll container
+  //                           has already claimed the gesture via bubbling
   const outerRef           = useRef(null);
   const scrollContainerRef = useRef(null);
   const pullY    = useMotionValue(0);
@@ -150,7 +151,7 @@ export default function App() {
   const indicatorY        = useTransform(springY, [0, CAP], [-40, 0]);
 
   useEffect(() => {
-    const el = outerRef.current;
+    const el = scrollContainerRef.current;
     if (!el) return;
 
     let startY     = 0;
@@ -158,9 +159,9 @@ export default function App() {
 
     const onTouchStart = (e) => {
       startY    = e.touches[0].clientY;
-      const scrollEl = scrollContainerRef.current;
-      // Only activate PTR when the scroll container is exactly at the top
-      isPulling = !scrollEl || scrollEl.scrollTop <= 0;
+      // scrollTop < 1 instead of === 0 — mobile sub-pixel rendering means
+      // scrollTop is often 0.33 or 0.5 at the visual top, never exactly 0
+      isPulling = el.scrollTop < 1;
       if (!isPulling) pullY.set(0);
     };
 

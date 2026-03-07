@@ -42,13 +42,23 @@ async def oanda_open_trades(payload: dict = Depends(get_current_user)):
 
 
 @router.get("/api/account/history")
-async def oanda_trade_history(payload: dict = Depends(get_current_user)):
+async def oanda_trade_history(
+    payload:   dict = Depends(get_current_user),
+    count:     int  = 500,
+    fetch_all: bool = True,
+    before_id: Optional[str] = None,
+):
     creds = get_oanda_creds()
     if not creds:
         raise HTTPException(422, "OANDA_API_KEY/ACCOUNT_ID not configured")
     from app.engines.oanda.executor import fetch_trade_history
     try:
-        return await fetch_trade_history(*creds, count=50)
+        return await fetch_trade_history(
+            *creds,
+            count     = min(count, 500),
+            fetch_all = fetch_all,
+            before_id = before_id,
+        )
     except Exception as e:
         raise HTTPException(503, f"Oanda error: {e}")
 
