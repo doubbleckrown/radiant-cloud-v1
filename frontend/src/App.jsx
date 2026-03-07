@@ -19,7 +19,7 @@
  *   • Together these ensure the VERY FIRST React paint uses the correct mode
  */
 import React, { useState, useEffect, useRef } from "react";
-import { AnimatePresence, motion }      from "framer-motion";
+import { AnimatePresence, motion, useMotionValue, useSpring, useTransform } from "framer-motion";
 import {
   SignedIn,
   SignedOut,
@@ -122,6 +122,45 @@ export default function App() {
     return () => clearTimeout(t);
   }, [isCrypto]);
 
+  // ── Pull-to-refresh (framer-motion) ──────────────────────────────────────
+  // pullY  — raw drag distance (capped at 110px via spring physics)
+  // springY — damped version of pullY for smooth indicator movement
+  // Only activates when the scroll container is at the very top.
+  const scrollContainerRef = useRef(null);
+  const pullY    = useMotionValue(0);
+  const springY  = useSpring(pullY, { stiffness: 260, damping: 28 });
+  const TRIGGER  = 70; // px to trigger reload
+  const CAP      = 110;
+  // Derived values for the indicator
+  const indicatorOpacity  = useTransform(springY, [0, 30, TRIGGER], [0, 0.5, 1]);
+  const indicatorScale    = useTransform(springY, [0, TRIGGER], [0.5, 1]);
+  const indicatorRotation = useTransform(springY, [0, CAP], [0, 180]);
+  const isPullingRef      = useRef(false); // whether pan started at scrollTop=0
+
+  const handlePanStart = () => {
+    const el = scrollContainerRef.current;
+    isPullingRef.current = !el || el.scrollTop <= 0;
+  };
+
+  const handlePan = (_, info) => {
+    if (!isPullingRef.current) return;
+    if (info.delta.y < 0 && pullY.get() === 0) return; // ignore upward swipes
+    const next = Math.max(0, Math.min(pullY.get() + info.delta.y * 0.6, CAP));
+    pullY.set(next);
+  };
+
+  const handlePanEnd = () => {
+    if (!isPullingRef.current) return;
+    isPullingRef.current = false;
+    if (pullY.get() >= TRIGGER) {
+      // Keep indicator visible for a beat, then reload
+      pullY.set(CAP);
+      setTimeout(() => window.location.reload(true), 300);
+    } else {
+      pullY.set(0);
+    }
+  };
+
   // ── Blank-screen guard — AFTER all hooks ─────────────────────────────────
   // isLoaded=false means Clerk hasn't resolved the session yet.
   // We wait up to 10 s, then surface the Refresh button.
@@ -159,6 +198,9 @@ export default function App() {
         <motion.div
           animate={{ background: isCrypto ? "#060503" : "#050505" }}
           transition={{ duration: 0.5, ease: "easeInOut" }}
+          onPanStart={handlePanStart}
+          onPan={handlePan}
+          onPanEnd={handlePanEnd}
           style={{
             position:   "relative",
             width:      "100%",
@@ -177,6 +219,49 @@ export default function App() {
             accentBdr={accentBdr}
             barH={BAR_H}
           />
+
+          {/* ── PTR indicator — sits just below the mode bar ─────────── */}
+          <motion.div
+            style={{
+              position:        "absolute",
+              top:             barOffset,
+              left:            0,
+              right:           0,
+              height:          40,
+              display:         "flex",
+              alignItems:      "center",
+              justifyContent:  "center",
+              zIndex:          30,
+              pointerEvents:   "none",
+              opacity:         indicatorOpacity,
+              y:               useTransform(springY, [0, CAP], [-40, 0]),
+            }}
+          >
+            <motion.div
+              style={{
+                width:        26,
+                height:       26,
+                borderRadius: "50%",
+                border:       `2px solid ${accent}`,
+                display:      "flex",
+                alignItems:   "center",
+                justifyContent: "center",
+                scale:        indicatorScale,
+                boxShadow:    `0 0 14px ${accent}50`,
+              }}
+            >
+              {/* Arrow icon rotates as you pull, flips at trigger */}
+              <motion.svg
+                width="12" height="12" viewBox="0 0 24 24"
+                fill="none" stroke={accent} strokeWidth="2.5"
+                strokeLinecap="round" strokeLinejoin="round"
+                style={{ rotate: indicatorRotation }}
+              >
+                <line x1="12" y1="5" x2="12" y2="19" />
+                <polyline points="19 12 12 19 5 12" />
+              </motion.svg>
+            </motion.div>
+          </motion.div>
 
           {/* ── ② Scanline overlay ───────────────────────────────────── */}
           <motion.div
@@ -204,6 +289,7 @@ export default function App() {
               initial="initial"
               animate="animate"
               exit="exit"
+              ref={scrollContainerRef}
               style={{
                 position:      "absolute",
                 top:           barOffset,

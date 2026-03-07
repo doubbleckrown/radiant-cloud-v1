@@ -26,8 +26,14 @@ async def get_markets(_: dict = Depends(get_current_user)):
         change24h  = round((price - daily_open) / daily_open * 100, 2) if price > 0 and daily_open > 0 else None
         result.append({
             "instrument": ins, "price": price, "change24h": change24h,
-            "confidence": smc.confidence        if smc else 0,
-            "bias":       smc.layer1_bias.value if smc else "NEUTRAL",
+            "confidence":  smc.confidence        if smc else 0,
+            "bias":        smc.layer1_bias.value if smc else "NEUTRAL",
+            "layer2":      smc.layer2_active     if smc else False,
+            "layer3":      smc.layer3_mss        if smc else False,
+            "pd_zone":     smc.pd_zone           if smc else None,
+            "pd_aligned":  smc.pd_aligned        if smc else False,
+            "h1_bars":     len(h1),
+            "d_bars":      len(candles_d),
         })
     return result
 
@@ -71,14 +77,19 @@ async def bybit_market(_: dict = Depends(get_current_user)):
         smc       = state.bybit_engines[sym].get_partial_state(candles_d, h1, price) if (price and len(h1) >= 60) else None
         result.append({
             "symbol": sym, "price": price,
-            "confidence": smc.confidence        if smc else 0,
-            "bias":       smc.layer1_bias.value if smc else "NEUTRAL",
-            "layer2":     smc.layer2_active     if smc else False,
-            "layer3":     smc.layer3_mss        if smc else False,
-            "high24h":    meta.get("high24h",   0.0),
-            "low24h":     meta.get("low24h",    0.0),
-            "volume24h":  meta.get("volume24h", 0.0),
-            "change24h":  round(meta.get("change24h", 0.0), 2),
+            "confidence":  smc.confidence        if smc else 0,
+            "bias":        smc.layer1_bias.value if smc else "NEUTRAL",
+            "layer2":      smc.layer2_active     if smc else False,
+            "layer3":      smc.layer3_mss        if smc else False,
+            "pd_zone":     smc.pd_zone           if smc else None,
+            "pd_aligned":  smc.pd_aligned        if smc else False,
+            # candle counts help the UI distinguish "loading" from "no signal"
+            "h1_bars":     len(h1),
+            "d_bars":      len(candles_d),
+            "high24h":     meta.get("high24h",   0.0),
+            "low24h":      meta.get("low24h",    0.0),
+            "volume24h":   meta.get("volume24h", 0.0),
+            "change24h":   round(meta.get("change24h", 0.0), 2),
         })
     result.sort(key=lambda x: x["volume24h"], reverse=True)
     return result

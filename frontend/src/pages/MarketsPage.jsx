@@ -396,6 +396,10 @@ export default function MarketsPage() {
           const state    = activeAnalysis[instrument];
           const conf     = state?.confidence ?? 0;
           const bias     = state?.bias ?? "NEUTRAL";
+          const pdZone   = state?.pd_zone   ?? null;
+          const pdAligned = state?.pd_aligned ?? false;
+          const h1Bars   = state?.h1_bars   ?? 0;
+          const dBars    = state?.d_bars    ?? 0;
           // 24h % change — Bybit from ticker meta, Oanda computed server-side from H1 open
           const change24 = isCrypto
             ? (bybitMeta[instrument]?.change24h ?? null)
@@ -495,7 +499,7 @@ export default function MarketsPage() {
                   <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                     <span style={{ color: C.sub, fontSize: "0.6rem" }}>{meta.category}</span>
                     {state != null && (
-                      <ConfBadge conf={conf} bias={bias} accent={accent} />
+                      <ConfBadge conf={conf} bias={bias} pdZone={pdZone} pdAligned={pdAligned} h1Bars={h1Bars} dBars={dBars} accent={accent} />
                     )}
                   </div>
                 </div>
@@ -555,40 +559,65 @@ export default function MarketsPage() {
 }
 
 // ── ConfBadge ─────────────────────────────────────────────────────────────────
-function ConfBadge({ conf, bias, accent }) {
-  const isBullish  = bias === "LONG"  || bias === "BULLISH";
-  const isBearish  = bias === "SHORT" || bias === "BEARISH";
-  const biasLabel  = isBullish ? "BULLISH" : isBearish ? "BEARISH" : "";
+//
+//  Six distinct states — each tells you exactly where the algorithm is:
+//
+//  FULL CONF  (100%, green/red)  — all 4 stages confirmed, signal fired / firing
+//  LIQ SWEPT  ( 67%, cyan)       — daily bias + H1 liquidity sweep confirmed
+//  WRONG ZONE ( 34%, orange)     — daily bias confirmed but price in wrong P/D zone
+//  D BIAS     ( 34%, grey)       — daily bias confirmed, waiting for H1 sweep
+//  D NEUTRAL  (  0%, dim)        — enough bars but daily structure is sideways/unclear
+//  LOADING    (  0%, dimmer)     — candle cache still filling (<60 H1 bars)
+//
+function ConfBadge({ conf, bias, pdZone, pdAligned, h1Bars, dBars, accent }) {
+  const isBullish = bias === "LONG"  || bias === "BULLISH";
+  const isBearish = bias === "SHORT" || bias === "BEARISH";
+  const biasLabel = isBullish ? "BULL" : isBearish ? "BEAR" : "";
 
-  // ── Layered Confluence Color Evolution — SMC/ICT v3 stages ─────────────────
-  // Stage 1 (34%) : Grey       — Daily HTF bias confirmed (HH+HL or EMA alignment)
-  // Stage 2 (67%) : Blue       — H1 Liquidity sweep detected (stop-hunt confirmed)
-  // Stage 3+4 (100%): Green/Red — H1 MSS (CHoCH/BOS) + M5 OB or FVG entry zone
-  const layerColor = conf >= 100
-    ? (isBullish ? "#00FF00" : isBearish ? "#FF0000" : accent)
-    : conf >= 67
-    ? "#00BFFF"    // H1 Liquidity Sweep stage — cyan/blue
-    : conf >= 34
-    ? "#888888"
-    : C.sub;
+  // Determine exact state
+  const hasEnoughBars = h1Bars >= 60;
+  const isLoading     = !hasEnoughBars;
+  const isNeutral     = conf === 0 && bias === "NEUTRAL" && hasEnoughBars;
+  const isWrongZone   = conf === 34 && !pdAligned && pdZone !== null;
 
-  const labelColor = layerColor;
+  let color, glow, topLine, subLine;
 
-  const glowColor = conf >= 100
-    ? (isBullish ? "rgba(0,255,0,0.85)" : isBearish ? "rgba(255,0,0,0.85)" : null)
-    : conf >= 67
-    ? "rgba(0,191,255,0.6)"    // H1 sweep glow
-    : null;
-
-  // Stage sublabel — shown below the confidence number
-  // conf=0 → SCANNING state (daily candles still warming)
-  const isScanning = conf === 0;
-  const stageLabel = conf >= 100 ? "FULL CONF"
-    : conf >= 67  ? "LIQ SWEPT"
-    : conf >= 34  ? "D BIAS"
-    : "";
-
-  const displayColor = isScanning ? "rgba(255,255,255,0.18)" : labelColor;
+  if (conf >= 100) {
+    color   = isBullish ? "#00FF00" : isBearish ? "#FF0000" : accent;
+    glow    = isBullish ? "rgba(0,255,0,0.85)" : "rgba(255,0,0,0.85)";
+    topLine = `${conf}% ${biasLabel}`;
+    subLine = "FULL CONF";
+  } else if (conf >= 67) {
+    color   = "#00BFFF";
+    glow    = "rgba(0,191,255,0.6)";
+    topLine = `${conf}% ${biasLabel}`;
+    subLine = "LIQ SWEPT";
+  } else if (isWrongZone) {
+    // Daily bias confirmed but price is in the wrong premium/discount zone.
+    // Algorithm is watching — it will re-evaluate every 30s.
+    color   = "#FF8C00";
+    glow    = null;
+    topLine = `${biasLabel} · ${pdZone ?? "?"}`;
+    subLine = "WRONG ZONE";
+  } else if (conf >= 34) {
+    color   = "#888888";
+    glow    = null;
+    topLine = biasLabel;
+    subLine = "D BIAS";
+  } else if (isNeutral) {
+    // Enough bars, but daily HH+HL / LH+LL structure is unclear right now.
+    // This is normal — many instruments consolidate for days.
+    color   = "rgba(255,255,255,0.22)";
+    glow    = null;
+    topLine = "D NEUTRAL";
+    subLine = `${dBars}D · ${h1Bars}H1`;
+  } else {
+    // Still loading bars into the cache
+    color   = "rgba(255,255,255,0.14)";
+    glow    = null;
+    topLine = "LOADING";
+    subLine = h1Bars > 0 ? `${h1Bars}/60 H1` : "awaiting data";
+  }
 
   return (
     <span style={{
@@ -600,26 +629,21 @@ function ConfBadge({ conf, bias, accent }) {
       fontWeight:    700,
       padding:       "2px 7px",
       borderRadius:  5,
-      background:    isScanning ? "rgba(255,255,255,0.04)" : `${labelColor}12`,
-      border:        `1px solid ${isScanning ? "rgba(255,255,255,0.1)" : labelColor + "30"}`,
-      color:         displayColor,
+      background:    `${color}10`,
+      border:        `1px solid ${color}28`,
+      color,
       fontFamily:    FONT_MONO,
       letterSpacing: "0.06em",
-      textShadow:    (!isScanning && glowColor) ? `0 0 10px ${glowColor}` : "none",
-      filter:        (!isScanning && conf >= 67) ? `drop-shadow(0 0 6px ${labelColor}99)` : "none",
+      textShadow:    glow ? `0 0 10px ${glow}` : "none",
+      filter:        conf >= 67 ? `drop-shadow(0 0 6px ${color}99)` : "none",
       lineHeight:    1.2,
     }}>
-      {isScanning
-        ? <span>SCANNING</span>
-        : <>
-            <span>{conf}% {biasLabel}</span>
-            {stageLabel && (
-              <span style={{ fontSize: "0.45rem", opacity: 0.7, letterSpacing: "0.1em" }}>
-                {stageLabel}
-              </span>
-            )}
-          </>
-      }
+      <span>{topLine}</span>
+      {subLine && (
+        <span style={{ fontSize: "0.45rem", opacity: 0.65, letterSpacing: "0.1em" }}>
+          {subLine}
+        </span>
+      )}
     </span>
   );
 }
