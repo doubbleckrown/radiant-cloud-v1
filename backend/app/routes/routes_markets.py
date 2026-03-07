@@ -33,7 +33,7 @@ async def get_markets(_: dict = Depends(get_current_user)):
             "pd_zone":     smc.pd_zone           if smc else None,
             "pd_aligned":  smc.pd_aligned        if smc else False,
             "h1_bars":     len(h1),
-            "d_bars":      len(candles_4h),   # 4H bars
+            "d_bars":      len(candles_d),
         })
     return result
 
@@ -85,7 +85,7 @@ async def bybit_market(_: dict = Depends(get_current_user)):
             "pd_aligned":  smc.pd_aligned        if smc else False,
             # candle counts help the UI distinguish "loading" from "no signal"
             "h1_bars":     len(h1),
-            "d_bars":      len(candles_d),
+            "d_bars":      len(candles_4h),
             "high24h":     meta.get("high24h",   0.0),
             "low24h":      meta.get("low24h",    0.0),
             "volume24h":   meta.get("volume24h", 0.0),
