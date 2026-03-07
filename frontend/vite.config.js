@@ -33,12 +33,12 @@ export default defineConfig(({ mode }) => {
         includeAssets: ["favicon.ico", "icon-192.png", "icon-512.png"],
 
         manifest: {
-          name:             "FX Radiant",
-          short_name:       "FX Radiant",
+          name:             "FX Signal",
+          short_name:       "FX Signal",
           description:      "Smart Money Concepts trading platform",
           theme_color:      "#050505",
           background_color: "#050505",
-          display:          "standalone",
+          display:          "minimal-ui",
           orientation:      "portrait",
           start_url:        "/",
           icons: [

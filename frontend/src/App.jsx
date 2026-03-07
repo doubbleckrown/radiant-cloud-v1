@@ -19,7 +19,7 @@
  *   • Together these ensure the VERY FIRST React paint uses the correct mode
  */
 import React, { useState, useEffect, useRef } from "react";
-import { AnimatePresence, motion, useMotionValue, useSpring, useTransform } from "framer-motion";
+import { AnimatePresence, motion } from "framer-motion";
 import {
   SignedIn,
   SignedOut,
@@ -122,86 +122,9 @@ export default function App() {
     return () => clearTimeout(t);
   }, [isCrypto]);
 
-  // ── Pull-to-refresh (native touch events) ───────────────────────────────
-  //
-  // WHY native touch instead of Framer Motion onPan*:
-  //   Framer Motion's onPan uses Pointer Events.  iOS WebKit cancels pointer
-  //   events during vertical touch scroll — the gesture is silently eaten before
-  //   React ever sees it.  Android Chrome's built-in overscroll spinner has the
-  //   same effect.  Native touch listeners registered as { passive: false } let
-  //   us call e.preventDefault() which is the ONLY way to suppress both.
-  //
-  // Design:
-  //   • touchstart  — record start Y; check scrollTop === 0 (gate)
-  //   • touchmove   — non-passive so preventDefault() works; drive pullY
-  //   • touchend    — trigger reload or snap back
-  //   • scrollContainerRef — listeners live HERE so preventDefault() fires at
-  //                           the event target, not after the scroll container
-  //                           has already claimed the gesture via bubbling
-  const outerRef           = useRef(null);
+  // scrollContainerRef — the inner scrollable div; needed for overscroll to
+  // propagate correctly to the browser so native PTR can trigger.
   const scrollContainerRef = useRef(null);
-  const pullY    = useMotionValue(0);
-  const springY  = useSpring(pullY, { stiffness: 260, damping: 28 });
-  const TRIGGER  = 70;
-  const CAP      = 110;
-
-  const indicatorOpacity  = useTransform(springY, [0, 30, TRIGGER], [0, 0.5, 1]);
-  const indicatorScale    = useTransform(springY, [0, TRIGGER], [0.5, 1]);
-  const indicatorRotation = useTransform(springY, [0, CAP], [0, 180]);
-  const indicatorY        = useTransform(springY, [0, CAP], [-40, 0]);
-
-  useEffect(() => {
-    const el = scrollContainerRef.current;
-    if (!el) return;
-
-    let startY     = 0;
-    let isPulling  = false;
-
-    const onTouchStart = (e) => {
-      startY    = e.touches[0].clientY;
-      // scrollTop < 1 instead of === 0 — mobile sub-pixel rendering means
-      // scrollTop is often 0.33 or 0.5 at the visual top, never exactly 0
-      isPulling = el.scrollTop < 1;
-      if (!isPulling) pullY.set(0);
-    };
-
-    const onTouchMove = (e) => {
-      if (!isPulling) return;
-      const dy = e.touches[0].clientY - startY;
-      if (dy <= 0) {
-        // User swiped up — abort PTR, let normal scroll handle it
-        isPulling = false;
-        pullY.set(0);
-        return;
-      }
-      // Suppress iOS rubber-band bounce AND Android native overscroll spinner
-      e.preventDefault();
-      pullY.set(Math.min(dy * 0.55, CAP));
-    };
-
-    const onTouchEnd = () => {
-      if (!isPulling) return;
-      isPulling = false;
-      if (pullY.get() >= TRIGGER) {
-        pullY.set(CAP);
-        setTimeout(() => window.location.reload(true), 300);
-      } else {
-        pullY.set(0);
-      }
-    };
-
-    // passive: true  on start/end  — no need to preventDefault there
-    // passive: false on move       — MUST be false to call preventDefault()
-    el.addEventListener('touchstart', onTouchStart, { passive: true  });
-    el.addEventListener('touchmove',  onTouchMove,  { passive: false });
-    el.addEventListener('touchend',   onTouchEnd,   { passive: true  });
-
-    return () => {
-      el.removeEventListener('touchstart', onTouchStart);
-      el.removeEventListener('touchmove',  onTouchMove);
-      el.removeEventListener('touchend',   onTouchEnd);
-    };
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Blank-screen guard — AFTER all hooks ─────────────────────────────────
   // isLoaded=false means Clerk hasn't resolved the session yet.
@@ -238,7 +161,6 @@ export default function App() {
           "breathes" when switching.
         */}
         <motion.div
-          ref={outerRef}
           animate={{ background: isCrypto ? "#060503" : "#050505" }}
           transition={{ duration: 0.5, ease: "easeInOut" }}
           style={{
@@ -259,49 +181,6 @@ export default function App() {
             accentBdr={accentBdr}
             barH={BAR_H}
           />
-
-          {/* ── PTR indicator — sits just below the mode bar ─────────── */}
-          <motion.div
-            style={{
-              position:        "absolute",
-              top:             barOffset,
-              left:            0,
-              right:           0,
-              height:          40,
-              display:         "flex",
-              alignItems:      "center",
-              justifyContent:  "center",
-              zIndex:          30,
-              pointerEvents:   "none",
-              opacity:         indicatorOpacity,
-              y:               indicatorY,
-            }}
-          >
-            <motion.div
-              style={{
-                width:        26,
-                height:       26,
-                borderRadius: "50%",
-                border:       `2px solid ${accent}`,
-                display:      "flex",
-                alignItems:   "center",
-                justifyContent: "center",
-                scale:        indicatorScale,
-                boxShadow:    `0 0 14px ${accent}50`,
-              }}
-            >
-              {/* Arrow icon rotates as you pull, flips at trigger */}
-              <motion.svg
-                width="12" height="12" viewBox="0 0 24 24"
-                fill="none" stroke={accent} strokeWidth="2.5"
-                strokeLinecap="round" strokeLinejoin="round"
-                style={{ rotate: indicatorRotation }}
-              >
-                <line x1="12" y1="5" x2="12" y2="19" />
-                <polyline points="19 12 12 19 5 12" />
-              </motion.svg>
-            </motion.div>
-          </motion.div>
 
           {/* ── ② Scanline overlay ───────────────────────────────────── */}
           <motion.div
@@ -337,7 +216,6 @@ export default function App() {
                 right:             0,
                 bottom:            0,
                 overflowY:         "auto",
-                overscrollBehavior: "none",   // stops Android Chrome native PTR spinner
                 WebkitOverflowScrolling: "touch", // momentum scroll on iOS
                 paddingBottom:     "calc(72px + env(safe-area-inset-bottom, 0px))",
               }}

@@ -3,22 +3,10 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-  <meta name="mobile-web-app-capable" content="yes">
-  <meta name="mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <meta name="theme-color" content="#050505" id="theme-color-meta" />
   <title>FX Radiant</title>
-
-  <!--
-    ── PWA Icons ───────────────────────────────────────────────────────────────
-    favicon.ico  — browser tab icon (all browsers)
-    icon-192.png — apple-touch-icon for iOS "Add to Home Screen" + Android PWA
-    Without these two <link> tags the browser tab shows a broken icon and the
-    PWA install prompt has no icon regardless of what is in the manifest.
-    VitePWA injects the manifest <link> automatically at build time — do not
-    add it here or you get a duplicate.
-  -->
-  <link rel="icon" type="image/x-icon" href="/favicon.ico" />
-  <link rel="apple-touch-icon" sizes="192x192" href="/icon-192.png" />
 
   <!--
     ── ANTI-FLASH: Mode Detection Script ──────────────────────────────────────
@@ -27,15 +15,15 @@
     on page refresh when the user is in CRYPTO mode.
 
     FOREX  → #00FF41  (Radiant Green)
-    CRYPTO → #FFA500  (Bybit Orange)
+    CRYPTO → #FF9900  (Bybit Orange)
   -->
   <script>
     (function () {
       try {
         var m = localStorage.getItem('fx-radiant-app-mode');
         var isCrypto  = m === 'CRYPTO';
-        var accent    = isCrypto ? '#FFA500'              : '#00FF41';
-        var accentHdr = isCrypto ? 'rgba(0,180,200,0.08)' : 'rgba(0,255,65,0.08)';
+        var accent    = isCrypto ? '#FF9900'              : '#00FF41';
+        var accentHdr = isCrypto ? 'rgba(255,153,0,0.08)' : 'rgba(0,255,65,0.08)';
         var r = document.documentElement;
         r.style.setProperty('--accent',     accent);
         r.style.setProperty('--accent-hdr', accentHdr);
@@ -71,7 +59,9 @@
       margin: 0;
       padding: 0;
       background: #050505;
-      overflow: hidden;
+      /* overflow: hidden removed — it blocks native browser pull-to-refresh.
+         The app uses an internal scroll container (App.jsx scrollContainerRef)
+         so the document itself never needs to scroll anyway. */
       font-family: 'Inter', sans-serif;
     }
     ::-webkit-scrollbar { width: 0; background: transparent; }
