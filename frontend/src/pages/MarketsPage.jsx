@@ -121,6 +121,7 @@ export default function MarketsPage() {
   // ── Pull-to-refresh state ─────────────────────────────────────────────────
   const [isRefreshing,  setIsRefreshing]  = useState(false);
   const [pullProgress,  setPullProgress]  = useState(0);   // 0–1
+  const [htfCountdown,  setHtfCountdown]  = useState(600); // seconds until next 4H refresh
   const ptrTouchStartY = useRef(0);
   const ptrIsPulling   = useRef(false);
   const PTR_THRESHOLD  = 64;   // px of drag needed to trigger refresh
@@ -233,6 +234,18 @@ export default function MarketsPage() {
     return () => clearInterval(id);
   }, [isCrypto, fetchBybitMarket]);
 
+  // ── 4H preflight countdown (10-min cycle = HTF_REFRESH_CYCLES × 60s) ────
+  // Counts down from 600s and resets — mirrors the backend's HTF_REFRESH_CYCLES.
+  // Disappears automatically once all symbols have ≥200 4H bars.
+  useEffect(() => {
+    if (!isCrypto) return;
+    setHtfCountdown(600);
+    const id = setInterval(() => {
+      setHtfCountdown(s => s <= 1 ? 600 : s - 1);
+    }, 1000);
+    return () => clearInterval(id);
+  }, [isCrypto]);
+
   // ── Mode switch: clear selected instrument + reset category ──────────────
   useEffect(() => {
     setSelectedInstrument(null);
@@ -296,6 +309,16 @@ export default function MarketsPage() {
 
   // Live count (have a price)
   const liveCount = filteredInstruments.filter(k => (activePrices[k] ?? 0) > 0).length;
+
+  // ── 4H pre-flight readiness (Bybit only) ──────────────────────────────────
+  // A symbol is "ready" when its 4H cache has ≥200 bars (enough for EMA-200 bias).
+  // totalBybit is the full symbol list, not just the filtered subset, so the
+  // banner accurately reflects global backend readiness, not category view.
+  const totalBybitSymbols = Object.keys(bybitAnalysis).length;
+  const readyBybit = Object.values(bybitAnalysis).filter(a => (a?.d_bars ?? 0) >= 200).length;
+  const show4HBanner = isCrypto && totalBybitSymbols > 0 && readyBybit < totalBybitSymbols;
+  const htfMins = Math.floor(htfCountdown / 60);
+  const htfSecs = String(htfCountdown % 60).padStart(2, "0");
 
   return (
     <div
@@ -384,6 +407,50 @@ export default function MarketsPage() {
               }} />
             </div>
           )}
+        </div>
+      )}
+
+      {/* ── 4H Pre-flight banner (Bybit only, auto-hides when all symbols ready) ── */}
+      {show4HBanner && (
+        <div style={{
+          margin: "8px 16px 4px",
+          padding: "10px 14px",
+          borderRadius: 12,
+          background:  "rgba(255,140,0,0.06)",
+          border:      "1px solid rgba(255,140,0,0.22)",
+        }}>
+          {/* Title row */}
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+            <span style={{ color: "#FF8C00", fontSize: "0.62rem", fontWeight: 800, fontFamily: FONT_MONO, letterSpacing: "0.1em" }}>
+              ⏳ 4H CANDLES LOADING
+            </span>
+            <span style={{ color: "rgba(255,140,0,0.55)", fontSize: "0.58rem", fontFamily: FONT_MONO }}>
+              next refresh {htfMins}:{htfSecs}
+            </span>
+          </div>
+
+          {/* Progress bar */}
+          <div style={{ height: 4, borderRadius: 99, background: "rgba(255,140,0,0.12)", marginBottom: 8, overflow: "hidden" }}>
+            <motion.div
+              animate={{ width: totalBybitSymbols > 0 ? `${(readyBybit / totalBybitSymbols) * 100}%` : "0%" }}
+              transition={{ duration: 0.6, ease: "easeOut" }}
+              style={{ height: "100%", borderRadius: 99, background: "#FF8C00" }}
+            />
+          </div>
+
+          {/* Count + explanation */}
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+            <span style={{ color: "rgba(255,255,255,0.45)", fontSize: "0.58rem", fontFamily: FONT_MONO }}>
+              {readyBybit}/{totalBybitSymbols} symbols ready · need 200 bars for HTF bias
+            </span>
+            <span style={{
+              color: "#FF8C00", fontSize: "0.58rem", fontFamily: FONT_MONO, fontWeight: 700,
+              padding: "2px 7px", borderRadius: 5,
+              background: "rgba(255,140,0,0.1)", border: "1px solid rgba(255,140,0,0.25)",
+            }}>
+              {readyBybit === 0 ? "FETCHING" : "PARTIAL"}
+            </span>
+          </div>
         </div>
       )}
 

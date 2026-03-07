@@ -141,12 +141,12 @@ async def lifespan(app: FastAPI):
             logger.warning("Bybit seed %s %s: %s", sym, iv, exc)
         return sym, iv, None
 
-    bybit_results = await asyncio.gather(*[_seed_bybit(s, iv) for s in BYBIT_SYMBOLS for iv in ("60", "15")])
+    bybit_results = await asyncio.gather(*[_seed_bybit(s, iv) for s in BYBIT_SYMBOLS for iv in ("240", "60", "15")])
     bseeded = sum(1 for _, _, c in bybit_results if c is not None)
     for sym, iv, candles in bybit_results:
         if candles is not None:
             state.bybit_candle_cache[sym][iv] = candles
-    logger.info("Bybit candle seed: %d/%d loaded (H1+M15)", bseeded, len(bybit_results))
+    logger.info("Bybit candle seed: %d/%d loaded (4H+H1+M15)", bseeded, len(bybit_results))
 
     # ── Start background loops ────────────────────────────────────────────────
     asyncio.create_task(price_stream_loop())
