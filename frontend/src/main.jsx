@@ -4,6 +4,23 @@ import { ClerkProvider } from "@clerk/clerk-react";
 import App from "./App.jsx";
 import "./index.css";
 
+// ── Service Worker update → clean reload ──────────────────────────────────────
+// WHY this exists:
+//   vite.config.js uses skipWaiting:true — every new Vercel deployment
+//   immediately activates a new SW mid-session.  Without this listener the old
+//   page keeps running with orphaned JS chunk hashes that the new SW no longer
+//   serves → blank screen on the next tab switch or lazy-import.
+//
+//   The `controllerchange` event fires the moment a new SW takes control.
+//   Reloading here is safe for a trading app because all state lives on the
+//   backend; a clean reload re-fetches everything fresh with the updated SW.
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    window.location.reload();
+  });
+}
+
+
 // ── Global SW error guard ──────────────────────────────────────────────────────
 // Belt-and-suspenders: catches any SW-related unhandled rejections before they
 // can surface as a blank screen.  Must be the very first statement.

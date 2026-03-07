@@ -118,6 +118,52 @@ export default function SignalsPage() {
   const botRisk = isCrypto ? bybit_risk_pct : oanda_risk_pct;
   const pollRef = useRef(null);
 
+  // ── Voice Alerts (Web Speech API) ─────────────────────────────────────────
+  // Speaks a new signal aloud the moment it arrives — works even when the
+  // screen is off or the app is in the background tab, as long as the PWA
+  // is open.  Uses a ref to track already-spoken signals so each fires once.
+  const spokenRef = useRef(new Set());
+
+  const speakSignal = (sig) => {
+    if (!window.speechSynthesis) return;
+    const sym  = (sig.instrument ?? sig.symbol ?? "").replace(/_/g, " ");
+    const dir  = sig.direction === "LONG" ? "Long" : "Short";
+    const zone = sig.pd_zone === "DISCOUNT" ? "Discount Zone reached."
+               : sig.pd_zone === "PREMIUM"  ? "Premium Zone reached."
+               : "";
+    const sl   = sig.sl   != null ? `Stop Loss at ${sig.sl}.`   : "";
+    const tp   = sig.tp   != null ? `Take Profit at ${sig.tp}.` : "";
+    const text = [
+      "New Signal Alert.",
+      sym + ".",
+      sig.direction === "LONG" ? "Bullish Bias confirmed." : "Bearish Bias confirmed.",
+      zone,
+      `Entering ${dir}.`,
+      sl,
+      tp,
+    ].filter(Boolean).join(" ");
+
+    const utt = new SpeechSynthesisUtterance(text);
+    utt.rate   = 0.92;
+    utt.pitch  = 1.0;
+    utt.volume = 1.0;
+    window.speechSynthesis.cancel(); // drop any queued speech first
+    window.speechSynthesis.speak(utt);
+  };
+
+  // Watch for genuinely new 100% signals and speak them once
+  useEffect(() => {
+    const full = signals.filter(s => (s.confidence ?? 0) >= 100 && s.exec_status !== "failed");
+    for (const sig of full) {
+      const key = dedupeKey(sig);
+      if (!spokenRef.current.has(key)) {
+        spokenRef.current.add(key);
+        speakSignal(sig);
+      }
+    }
+  }, [signals]); // eslint-disable-line react-hooks/exhaustive-deps
+
+
   useEffect(() => {
     getToken().then(token => fetchProfile(token)).catch(() => {});
   }, [isCrypto]); // eslint-disable-line react-hooks/exhaustive-deps
