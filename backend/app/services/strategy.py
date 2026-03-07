@@ -770,7 +770,7 @@ def find_m5_entry_zone(
 def classify_premium_discount(
     candles:       list[Candle],
     current_price: float,
-    lookback:      int   = 50,
+    lookback:      int   = 24,
     eq_band_pct:   float = 0.025,
 ) -> tuple[str, float, float, float]:
     """
