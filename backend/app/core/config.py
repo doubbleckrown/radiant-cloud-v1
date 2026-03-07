@@ -79,7 +79,7 @@ BYBIT_QTY_STEP: dict[str, float] = {
     "WLFIUSDT":      10.0,    # 0 dp  (multiples of 10)
 }
 
-BYBIT_INTERVALS: list[str] = ["D", "60", "15", "5", "1"]
+BYBIT_INTERVALS: list[str] = ["240", "60", "15", "5", "1"]
 
 CLERK_JWKS_URL = os.getenv("CLERK_JWKS_URL","https://immune-donkey-10.clerk.accounts.dev/.well-known/jwks.json")
 ONESIGNAL_APP_ID   = os.getenv("ONESIGNAL_APP_ID",  "")

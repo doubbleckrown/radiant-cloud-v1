@@ -380,7 +380,9 @@ export default function SignalsPage() {
             </p>
             <p style={{ color: C.sub, fontSize: "0.72rem", margin: 0 }}>
               {activeTab === "Active"
-                ? "Daily Bias → H1 Liq. Sweep → MSS → M5 OB/FVG — all 4 stages required."
+                ? (isCrypto
+                    ? "4H Bias → H1 Liq. Sweep → MSS → M5 OB/FVG — all 4 stages required."
+                    : "Daily Bias → H1 Liq. Sweep → MSS → M5 OB/FVG — all 4 stages required.")
                 : "Past signals will appear here after their 2-hour window expires."}
             </p>
           </motion.div>
@@ -553,7 +555,7 @@ function SignalCard({ sig, locked, isActive, isCrypto, accent, accentDim, accent
             {conf}%
           </motion.p>
           <p style={{ color: conf >= 100 ? confColor : C.sub, fontSize: "0.62rem", margin: "2px 0 0", letterSpacing: "0.06em" }}>
-            {conf >= 100 ? "FULL CONF" : conf >= 67 ? "LIQ SWEPT" : conf >= 34 ? "D BIAS" : "SCANNING"}
+            {conf >= 100 ? "FULL CONF" : conf >= 67 ? "LIQ SWEPT" : conf >= 34 ? (isCrypto ? "4H BIAS" : "D BIAS") : "SCANNING"}
           </p>
         </div>
 
@@ -596,9 +598,9 @@ function SignalCard({ sig, locked, isActive, isCrypto, accent, accentDim, accent
             <div style={{ padding: "14px 16px", borderTop: `1px solid ${C.cardBdr}` }}>
               {/* ── Stage badges ────────────────────────────────────────────── */}
               <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
-                {/* Stage 1 — Daily HTF Bias */}
+                {/* Stage 1 — HTF Bias (Daily for Oanda, 4H for Bybit) */}
                 <LayerBadge
-                  label="D BIAS"
+                  label={isCrypto ? "4H BIAS" : "D BIAS"}
                   active={!!sig.layer1}
                   value={sig.layer1 ?? null}
                   accent={accent} isLong={isLong}
@@ -680,11 +682,12 @@ function SignalCard({ sig, locked, isActive, isCrypto, accent, accentDim, accent
 }
 
 // ── Layer color map — SMC v3 stage names ─────────────────────────────────────
-// Stage 1: Daily Bias     → grey  (structural context)
+// Stage 1: HTF Bias (Daily/Oanda, 4H/Bybit) → grey  (structural context)
 // Stage 2: H1 Liq. Sweep  → blue  (liquidity event)
 // Stage 3+4: MSS + Zone   → directional (green long / red short)
 const LAYER_COLORS = {
   "D BIAS":   { active: "#888888", glow: "rgba(136,136,136,0.4)" },
+  "4H BIAS":  { active: "#888888", glow: "rgba(136,136,136,0.4)" },  // Bybit HTF
   "H1 SWEEP": { active: "#00BFFF", glow: "rgba(0,191,255,0.5)"   },
   "MSS+ZONE": { active: "#00FF41", glow: "rgba(0,255,65,0.6)"    },
 };

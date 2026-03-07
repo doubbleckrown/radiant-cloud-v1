@@ -33,7 +33,7 @@ async def get_markets(_: dict = Depends(get_current_user)):
             "pd_zone":     smc.pd_zone           if smc else None,
             "pd_aligned":  smc.pd_aligned        if smc else False,
             "h1_bars":     len(h1),
-            "d_bars":      len(candles_d),
+            "d_bars":      len(candles_4h),   # 4H bars
         })
     return result
 
@@ -72,9 +72,9 @@ async def bybit_market(_: dict = Depends(get_current_user)):
     for sym in BYBIT_SYMBOLS:
         price = state.bybit_prices.get(sym, 0.0)
         h1        = state.bybit_candle_cache[sym]["60"]
-        candles_d = state.bybit_candle_cache[sym].get("D", [])
+        candles_4h = state.bybit_candle_cache[sym].get("240", [])
         meta      = state.bybit_meta.get(sym, {})
-        smc       = state.bybit_engines[sym].get_partial_state(candles_d, h1, price) if (price and len(h1) >= 60) else None
+        smc       = state.bybit_engines[sym].get_partial_state(candles_4h, h1, price) if (price and len(h1) >= 60) else None
         result.append({
             "symbol": sym, "price": price,
             "confidence":  smc.confidence        if smc else 0,

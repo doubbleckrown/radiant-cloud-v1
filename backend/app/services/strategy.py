@@ -914,7 +914,7 @@ class SMCConfluenceEngine:
 
         Parameters
         ----------
-        candles_d     : Daily candles (≥200 bars) — Stage 1 HTF bias
+        candles_d     : HTF candles — Daily for Oanda (≥200 bars), 4H for Bybit (≥200 bars)
         candles_h1    : H1 candles   (≥200 bars) — Stage 2 sweep + Stage 3 MSS
         candles_m5    : M5 candles   (≥50  bars) — Stage 4 entry zone
         current_price : Live mid price (Oanda) or mark price (Bybit)

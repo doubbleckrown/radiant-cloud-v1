@@ -149,6 +149,7 @@ async def fetch_account(api_key: str, api_secret: str) -> dict:
     eq   = float(acct.get("totalEquity",           0) or 0)
     av   = float(acct.get("totalAvailableBalance", 0) or 0)
     mg   = float(acct.get("totalMarginBalance",    0) or 0)
+    upl  = float(acct.get("totalPerpUPL",          0) or 0)   # ← was silently dropped
     # Coin entries can also be malformed — filter to dicts only
     raw_coins = acct.get("coin") or []
     coins = [
@@ -157,12 +158,13 @@ async def fetch_account(api_key: str, api_secret: str) -> dict:
     ]
     return {
         "accountType":           acct.get("accountType", "UNIFIED"),
-        "totalEquity":           round(eq, 2),
-        "totalMarginBalance":    round(mg, 2),
-        "totalAvailableBalance": round(av, 2),
-        "totalAvailable":        round(av, 2),
-        "totalMargin":           round(mg, 2),
-        "totalUSDT":             round(eq, 2),
+        "totalEquity":           round(eq,  2),
+        "totalMarginBalance":    round(mg,  2),
+        "totalAvailableBalance": round(av,  2),
+        "totalAvailable":        round(av,  2),
+        "totalMargin":           round(mg,  2),
+        "totalUSDT":             round(eq,  2),
+        "totalPerpUPL":          round(upl, 2),   # ← now forwarded to frontend
         "coin":                  coins,
     }
 
@@ -217,16 +219,27 @@ async def fetch_positions(api_key: str, api_secret: str) -> list:
 
 
 async def fetch_trade_history(api_key: str, api_secret: str, limit: int = 50) -> list:
+    """
+    Return closed trade records from /v5/position/closed-pnl.
+
+    This endpoint returns one record per closed position with:
+      closedPnl, avgEntryPrice, avgExitPrice, qty, side, symbol,
+      createdTime, updatedTime, orderId, leverage, orderType
+
+    Previously used /v5/execution/list which is a per-fill ledger — it
+    returned execPrice/execFee/execPnl per individual fill, not per trade,
+    so normalizeTrade() always showed $0 / dashes for every field.
+    """
     params, headers = sign_get(api_key, api_secret, {
         "category": "linear", "limit": str(min(limit, 100)),
     })
     async with httpx.AsyncClient(timeout=20) as c:
-        r = await c.get(f"{BYBIT_BASE}/v5/execution/list", headers=headers, params=params)
+        r = await c.get(f"{BYBIT_BASE}/v5/position/closed-pnl", headers=headers, params=params)
         r.raise_for_status()
     data = r.json()
     raise_on_error(data, "fetch_trade_history")
     trades = data.get("result", {}).get("list", [])
-    trades.sort(key=lambda t: int(t.get("execTime", 0)), reverse=True)
+    trades.sort(key=lambda t: int(t.get("createdTime", 0)), reverse=True)
     return trades
 
 

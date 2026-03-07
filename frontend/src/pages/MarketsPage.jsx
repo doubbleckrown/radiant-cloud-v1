@@ -89,7 +89,7 @@ const BYBIT_META = {
 const BYBIT_CATEGORIES = ["All", "L1", "DeFi", "Payments", "Exchange", "Meme"];
 
 // Bybit V5 interval strings — must match BYBIT_INTERVALS in backend config.py
-const BYBIT_INTERVAL = { M1: "1", M5: "5", M15: "15", H1: "60", D: "D" };
+const BYBIT_INTERVAL = { M1: "1", M5: "5", M15: "15", H1: "60", "4H": "240" };
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Main component
@@ -499,7 +499,7 @@ export default function MarketsPage() {
                   <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                     <span style={{ color: C.sub, fontSize: "0.6rem" }}>{meta.category}</span>
                     {state != null && (
-                      <ConfBadge conf={conf} bias={bias} pdZone={pdZone} pdAligned={pdAligned} h1Bars={h1Bars} dBars={dBars} accent={accent} />
+                      <ConfBadge conf={conf} bias={bias} pdZone={pdZone} pdAligned={pdAligned} h1Bars={h1Bars} dBars={dBars} isCrypto={isCrypto} accent={accent} />
                     )}
                   </div>
                 </div>
@@ -569,7 +569,7 @@ export default function MarketsPage() {
 //  D NEUTRAL  (  0%, dim)        — enough bars but daily structure is sideways/unclear
 //  LOADING    (  0%, dimmer)     — candle cache still filling (<60 H1 bars)
 //
-function ConfBadge({ conf, bias, pdZone, pdAligned, h1Bars, dBars, accent }) {
+function ConfBadge({ conf, bias, pdZone, pdAligned, h1Bars, dBars, isCrypto, accent }) {
   const isBullish = bias === "LONG"  || bias === "BULLISH";
   const isBearish = bias === "SHORT" || bias === "BEARISH";
   const biasLabel = isBullish ? "BULL" : isBearish ? "BEAR" : "";
@@ -610,7 +610,7 @@ function ConfBadge({ conf, bias, pdZone, pdAligned, h1Bars, dBars, accent }) {
     color   = "rgba(255,255,255,0.22)";
     glow    = null;
     topLine = "D NEUTRAL";
-    subLine = `${dBars}D · ${h1Bars}H1`;
+    subLine = `${dBars}${isCrypto ? "×4H" : "D"} · ${h1Bars}H1`;
   } else {
     // Still loading bars into the cache
     color   = "rgba(255,255,255,0.14)";
@@ -669,7 +669,7 @@ function InlineChart({ instrument, isCrypto, granularity, setGranularity, accent
   const [error,   setError]   = useState(null);
 
   const OANDA_GRAN  = ["M1", "M5", "M15", "H1", "D"];
-  const BYBIT_GRAN  = ["M1", "M5", "M15", "H1", "D"];
+  const BYBIT_GRAN  = ["M1", "M5", "M15", "H1", "4H"];
   const grans       = isCrypto ? BYBIT_GRAN : OANDA_GRAN;
 
   // ── Chart initialisation (once per mount) ─────────────────────────────────
@@ -709,8 +709,8 @@ function InlineChart({ instrument, isCrypto, granularity, setGranularity, accent
     setError(null);
 
     const bybitInterval = BYBIT_INTERVAL[granularity] ?? "60";
-    const isDaily  = granularity === "D";
-    const barCount = isDaily ? 90 : 120;   // 90 daily bars ≈ 3 months context
+    const isHTF    = granularity === "D" || granularity === "4H";
+    const barCount = isHTF ? 90 : 120;   // 90 × 4H bars ≈ 15 days; 90 × D bars ≈ 3 months
     const endpoint = isCrypto
       ? `/bybit/candles/${instrument}?interval=${bybitInterval}&limit=${barCount}`
       : `/markets/${instrument}/candles?granularity=${granularity}&count=${barCount}`;

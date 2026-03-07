@@ -2,10 +2,10 @@
 app/engines/bybit/engine.py — Bybit ticker refresh + candle polling + SMC analysis.
 
 MTF data flow (fixed in v3.0):
-  • Fetches Daily ("D"), H1 ("60"), and M5 ("5") candles.
-  • Daily candles refreshed every DAILY_REFRESH_CYCLES cycles (~10 min).
-  • analyze() called with all three timeframes: candles_d, candles_h1, candles_m5.
-  • get_partial_state() for the MarketsPage UI poll also receives candles_d.
+  • Fetches 4H ("240"), H1 ("60"), and M5 ("5") candles.
+  • 4H candles refreshed every HTF_REFRESH_CYCLES cycles (~10 min).
+  • analyze() called with all three timeframes: candles_4h, candles_h1, candles_m5.
+  • get_partial_state() for the MarketsPage UI poll also receives candles_4h.
   • Completely isolated from Oanda state — only touches bybit_* dicts in state.py.
 """
 from __future__ import annotations
@@ -25,8 +25,8 @@ from app.services.strategy import Candle, TradeSignal
 
 logger = logging.getLogger("fx-signal")
 
-# Daily candles refreshed every N cycles (60 s each) → every 10 minutes.
-DAILY_REFRESH_CYCLES = 10
+# 4H candles refreshed every N cycles (60 s each) → every 10 minutes.
+HTF_REFRESH_CYCLES = 10
 
 
 async def fetch_tickers(symbols: list[str]) -> dict[str, dict]:
@@ -56,13 +56,13 @@ async def fetch_tickers(symbols: list[str]) -> dict[str, dict]:
     return result
 
 
-async def fetch_candles(symbol: str, interval: str, limit: int = 200) -> list[Candle]:
+async def fetch_candles(symbol: str, interval: str, limit: int = 250) -> list[Candle]:
     async with httpx.AsyncClient(timeout=20) as c:
         r = await c.get(
             f"{BYBIT_BASE}/v5/market/kline",
             params={
                 "category": "linear", "symbol": symbol,
-                "interval": interval, "limit": str(min(limit, 200)),
+                "interval": interval, "limit": str(min(limit, 1000)),
             },
         )
         r.raise_for_status()
@@ -90,14 +90,14 @@ async def bybit_refresh_loop() -> None:
     Refresh Bybit tickers + candles every 60 s, run SMC, auto-execute at 100%.
 
     Timeframe fetch schedule:
-      • D   — every DAILY_REFRESH_CYCLES cycles (~10 min).  Bias is stable.
+      • 240 — every HTF_REFRESH_CYCLES cycles (~10 min).  HTF bias (4H).
       • 60  — every cycle (60 s).  Primary H1 structural timeframe.
       • 5   — every cycle (60 s).  M5 entry zone detection.
       • 15  — every 5 cycles.  Context / chart display.
       • 1   — every 10 cycles. Fine-grain chart display.
 
     Rate limiting: CANDLE_DELAY_S = 0.12 s between each kline request → ≤ 8 req/s.
-    Normal cycle (D + H1 + M5 only): 19 × 3 = 57 req → 57 × 0.12 ≈ 6.8 s per cycle.
+    Normal cycle (240 + H1 + M5 only): 19 × 3 = 57 req → 57 × 0.12 ≈ 6.8 s per cycle.
     """
     FETCH_TIMEOUT  = 20.0
     MAX_BACKOFF    = 60.0
@@ -138,11 +138,11 @@ async def bybit_refresh_loop() -> None:
 
                 # Build the fetch list for this cycle
                 # H1 ("60") and M5 ("5") are always fetched — they drive analysis.
-                # Daily ("D") only refreshed every DAILY_REFRESH_CYCLES cycles.
+                # 4H ("240") only refreshed every HTF_REFRESH_CYCLES cycles.
                 # M15 ("15") every 5th cycle, M1 ("1") every 10th.
                 intervals_this_cycle: list[str] = ["60", "5"]
-                if cycle % DAILY_REFRESH_CYCLES == 0:
-                    intervals_this_cycle.insert(0, "D")
+                if cycle % HTF_REFRESH_CYCLES == 0:
+                    intervals_this_cycle.insert(0, "240")
                 if cycle % 5  == 0:
                     intervals_this_cycle.append("15")
                 if cycle % 10 == 0:
@@ -157,14 +157,16 @@ async def bybit_refresh_loop() -> None:
 
                 # ── SMC analysis (full 4-stage MTF) ──────────────────────────
                 try:
-                    candles_d  = state.bybit_candle_cache[sym].get("D",  [])
-                    candles_h1 = state.bybit_candle_cache[sym].get("60", [])
-                    candles_m5 = state.bybit_candle_cache[sym].get("5",  [])
+                    candles_4h = state.bybit_candle_cache[sym].get("240", [])
+                    candles_h1 = state.bybit_candle_cache[sym].get("60",  [])
+                    candles_m5 = state.bybit_candle_cache[sym].get("5",   [])
                     price      = state.bybit_prices.get(sym)
 
                     # Minimum data gates
+                    # 4H bias needs 210 bars for EMA-200; gate at 200 so first
+                    # full fetch (250 bars) is always sufficient.
                     if (not price
-                            or len(candles_d)  < 60
+                            or len(candles_4h) < 200
                             or len(candles_h1) < 60
                             or len(candles_m5) < 20):
                         continue
@@ -173,7 +175,7 @@ async def bybit_refresh_loop() -> None:
                         continue
 
                     signal: Optional[TradeSignal] = state.bybit_engines[sym].analyze(
-                        candles_d, candles_h1, candles_m5,
+                        candles_4h, candles_h1, candles_m5,
                         price, int(time.time()),
                     )
 
