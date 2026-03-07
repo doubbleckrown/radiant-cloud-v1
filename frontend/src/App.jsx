@@ -122,45 +122,85 @@ export default function App() {
     return () => clearTimeout(t);
   }, [isCrypto]);
 
-  // ── Pull-to-refresh (framer-motion) ──────────────────────────────────────
-  // pullY  — raw drag distance (capped at 110px via spring physics)
-  // springY — damped version of pullY for smooth indicator movement
-  // Only activates when the scroll container is at the very top.
+  // ── Pull-to-refresh (native touch events) ───────────────────────────────
+  //
+  // WHY native touch instead of Framer Motion onPan*:
+  //   Framer Motion's onPan uses Pointer Events.  iOS WebKit cancels pointer
+  //   events during vertical touch scroll — the gesture is silently eaten before
+  //   React ever sees it.  Android Chrome's built-in overscroll spinner has the
+  //   same effect.  Native touch listeners registered as { passive: false } let
+  //   us call e.preventDefault() which is the ONLY way to suppress both.
+  //
+  // Design:
+  //   • touchstart  — record start Y; check scrollTop === 0 (gate)
+  //   • touchmove   — non-passive so preventDefault() works; drive pullY
+  //   • touchend    — trigger reload or snap back
+  //   • outerRef    — attached to the outer wrapper div (replaces onPan* props)
+  //   • scrollContainerRef — still needed to check scrollTop
+  const outerRef           = useRef(null);
   const scrollContainerRef = useRef(null);
   const pullY    = useMotionValue(0);
   const springY  = useSpring(pullY, { stiffness: 260, damping: 28 });
-  const TRIGGER  = 70; // px to trigger reload
+  const TRIGGER  = 70;
   const CAP      = 110;
-  // Derived values for the indicator
+
   const indicatorOpacity  = useTransform(springY, [0, 30, TRIGGER], [0, 0.5, 1]);
   const indicatorScale    = useTransform(springY, [0, TRIGGER], [0.5, 1]);
   const indicatorRotation = useTransform(springY, [0, CAP], [0, 180]);
   const indicatorY        = useTransform(springY, [0, CAP], [-40, 0]);
-  const isPullingRef      = useRef(false); // whether pan started at scrollTop=0
 
-  const handlePanStart = () => {
-    const el = scrollContainerRef.current;
-    isPullingRef.current = !el || el.scrollTop <= 0;
-  };
+  useEffect(() => {
+    const el = outerRef.current;
+    if (!el) return;
 
-  const handlePan = (_, info) => {
-    if (!isPullingRef.current) return;
-    if (info.delta.y < 0 && pullY.get() === 0) return; // ignore upward swipes
-    const next = Math.max(0, Math.min(pullY.get() + info.delta.y * 0.6, CAP));
-    pullY.set(next);
-  };
+    let startY     = 0;
+    let isPulling  = false;
 
-  const handlePanEnd = () => {
-    if (!isPullingRef.current) return;
-    isPullingRef.current = false;
-    if (pullY.get() >= TRIGGER) {
-      // Keep indicator visible for a beat, then reload
-      pullY.set(CAP);
-      setTimeout(() => window.location.reload(true), 300);
-    } else {
-      pullY.set(0);
-    }
-  };
+    const onTouchStart = (e) => {
+      startY    = e.touches[0].clientY;
+      const scrollEl = scrollContainerRef.current;
+      // Only activate PTR when the scroll container is exactly at the top
+      isPulling = !scrollEl || scrollEl.scrollTop <= 0;
+      if (!isPulling) pullY.set(0);
+    };
+
+    const onTouchMove = (e) => {
+      if (!isPulling) return;
+      const dy = e.touches[0].clientY - startY;
+      if (dy <= 0) {
+        // User swiped up — abort PTR, let normal scroll handle it
+        isPulling = false;
+        pullY.set(0);
+        return;
+      }
+      // Suppress iOS rubber-band bounce AND Android native overscroll spinner
+      e.preventDefault();
+      pullY.set(Math.min(dy * 0.55, CAP));
+    };
+
+    const onTouchEnd = () => {
+      if (!isPulling) return;
+      isPulling = false;
+      if (pullY.get() >= TRIGGER) {
+        pullY.set(CAP);
+        setTimeout(() => window.location.reload(true), 300);
+      } else {
+        pullY.set(0);
+      }
+    };
+
+    // passive: true  on start/end  — no need to preventDefault there
+    // passive: false on move       — MUST be false to call preventDefault()
+    el.addEventListener('touchstart', onTouchStart, { passive: true  });
+    el.addEventListener('touchmove',  onTouchMove,  { passive: false });
+    el.addEventListener('touchend',   onTouchEnd,   { passive: true  });
+
+    return () => {
+      el.removeEventListener('touchstart', onTouchStart);
+      el.removeEventListener('touchmove',  onTouchMove);
+      el.removeEventListener('touchend',   onTouchEnd);
+    };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Blank-screen guard — AFTER all hooks ─────────────────────────────────
   // isLoaded=false means Clerk hasn't resolved the session yet.
@@ -197,11 +237,9 @@ export default function App() {
           "breathes" when switching.
         */}
         <motion.div
+          ref={outerRef}
           animate={{ background: isCrypto ? "#060503" : "#050505" }}
           transition={{ duration: 0.5, ease: "easeInOut" }}
-          onPanStart={handlePanStart}
-          onPan={handlePan}
-          onPanEnd={handlePanEnd}
           style={{
             position:   "relative",
             width:      "100%",
@@ -292,13 +330,15 @@ export default function App() {
               exit="exit"
               ref={scrollContainerRef}
               style={{
-                position:      "absolute",
-                top:           barOffset,
-                left:          0,
-                right:         0,
-                bottom:        0,
-                overflowY:     "auto",
-                paddingBottom: "calc(72px + env(safe-area-inset-bottom, 0px))",
+                position:          "absolute",
+                top:               barOffset,
+                left:              0,
+                right:             0,
+                bottom:            0,
+                overflowY:         "auto",
+                overscrollBehavior: "none",   // stops Android Chrome native PTR spinner
+                WebkitOverflowScrolling: "touch", // momentum scroll on iOS
+                paddingBottom:     "calc(72px + env(safe-area-inset-bottom, 0px))",
               }}
             >
               {/* ── ④ Tab-switch animation — keyed on activeTab ───────── */}

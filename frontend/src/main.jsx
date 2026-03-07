@@ -15,8 +15,35 @@ import "./index.css";
 //   Reloading here is safe for a trading app because all state lives on the
 //   backend; a clean reload re-fetches everything fresh with the updated SW.
 if ('serviceWorker' in navigator) {
+  // ── Fix 1: SW activates while page is alive (desktop + foreground mobile) ──
   navigator.serviceWorker.addEventListener('controllerchange', () => {
     window.location.reload();
+  });
+
+  // ── Fix 2: bfcache restoration (iOS / Android aggressive memory kill) ───────
+  // When mobile browsers background the PWA they freeze the JS context.  If a
+  // new SW activates while frozen the page resurrects from a snapshot (bfcache)
+  // with stale chunk hashes → blank screen.  `pageshow` with persisted=true
+  // fires on every bfcache restore; reloading here gives the new SW a clean page.
+  window.addEventListener('pageshow', (event) => {
+    if (event.persisted) {
+      window.location.reload();
+    }
+  });
+
+  // ── Fix 3: page suspended without bfcache (common on low-RAM Android) ───────
+  // Record the active SW controller on load.  When the page returns to the
+  // foreground, compare scriptURLs — if they differ the SW updated while we
+  // were away and we need a clean reload.
+  let _lastController = navigator.serviceWorker.controller;
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') {
+      const current = navigator.serviceWorker.controller;
+      if (current && _lastController && current.scriptURL !== _lastController.scriptURL) {
+        window.location.reload();
+      }
+      _lastController = current;
+    }
   });
 }
 
