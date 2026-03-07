@@ -390,7 +390,7 @@ def _snap_qty(raw: float, symbol: str) -> str:
         "BTCUSDT": 0.001, "ETHUSDT": 0.01,  "SOLUSDT": 0.1,
         "XRPUSDT": 1.0,   "BNBUSDT": 0.01,  "DOGEUSDT": 1.0,
         "AVAXUSDT": 0.1,  "ADAUSDT": 1.0,   "DOTUSDT": 0.1,
-        "LINKUSDT": 0.01, "LTCUSDT": 0.01,  "NEARUSDT": 1.0,
+        "LINKUSDT": 0.1,  "LTCUSDT": 0.1,   "NEARUSDT": 1.0,
         "ATOMUSDT": 0.01, "UNIUSDT": 0.1,
         "1000PEPEUSDT": 100.0, "1000BONKUSDT": 100.0,
         "FARTCOINUSDT": 1.0,   "XPLUSDT": 1.0, "WLFIUSDT": 10.0,
@@ -539,6 +539,20 @@ async def auto_execute(sym: str, sig_dict: dict, signal: TradeSignal) -> None:
 
         min_qty = BYBIT_MIN_ORDER_QTY.get(sym, 0.001) if isinstance(BYBIT_MIN_ORDER_QTY, dict) else 0.001
         qty_str = _snap_qty(max(qty_raw, min_qty), sym)
+
+        # ── Minimum notional guard ────────────────────────────────────────────
+        # Bybit rejects any order where qty × markPrice < 5 USDT (retCode 10001).
+        # If the snapped qty is below this threshold, scale up to the minimum
+        # notional and re-snap — safer than having the request hit the exchange.
+        BYBIT_MIN_NOTIONAL_USDT = 5.0
+        qty_final = float(qty_str)
+        if qty_final * mark_price < BYBIT_MIN_NOTIONAL_USDT:
+            qty_floor = BYBIT_MIN_NOTIONAL_USDT / mark_price
+            qty_str   = _snap_qty(max(qty_floor, min_qty), sym)
+            logger.info(
+                "Bybit AutoExec %s: qty scaled up to meet $%.0f min notional → %s",
+                sym, BYBIT_MIN_NOTIONAL_USDT, qty_str,
+            )
 
         logger.info(
             "Bybit AutoExec %s %s: mark=%.5f sl=%.5f tp=%.5f rr=1:%.2f "

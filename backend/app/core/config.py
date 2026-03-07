@@ -67,8 +67,8 @@ BYBIT_QTY_STEP: dict[str, float] = {
     "AVAXUSDT":      0.1,     # 1 dp
     "ADAUSDT":       1.0,     # 0 dp
     "DOTUSDT":       0.1,     # 1 dp
-    "LINKUSDT":      0.01,    # 2 dp
-    "LTCUSDT":       0.01,    # 2 dp  ← was sending 3dp → 10001 qty invalid
+    "LINKUSDT":      0.1,     # 1 dp  ← Bybit updated spec; 0.01 → 10001 qty invalid
+    "LTCUSDT":       0.1,     # 1 dp  ← Bybit updated spec; 0.01 → 10001 qty invalid
     "NEARUSDT":      1.0,     # 0 dp
     "ATOMUSDT":      0.01,    # 2 dp
     "UNIUSDT":       0.1,     # 1 dp
