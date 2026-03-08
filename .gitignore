@@ -5,6 +5,7 @@
 venv/
 backend/venv/
 env/
+.DS_Store
 
 # --- PYTHON JUNK ---
 
