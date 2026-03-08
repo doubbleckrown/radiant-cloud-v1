@@ -89,15 +89,15 @@ async def bybit_refresh_loop() -> None:
     """
     Refresh Bybit tickers + candles every 60 s, run SMC, auto-execute at 100%.
 
-    Timeframe fetch schedule:
-      • 240 — every HTF_REFRESH_CYCLES cycles (~10 min).  HTF bias (4H).
-      • 60  — every cycle (60 s).  Primary H1 structural timeframe.
-      • 5   — every cycle (60 s).  M5 entry zone detection.
-      • 15  — every 5 cycles.  Context / chart display.
-      • 1   — every 10 cycles. Fine-grain chart display.
+    Timeframe fetch schedule (updated for CryptoSMCEngine):
+      • 240 — every HTF_REFRESH_CYCLES cycles (~10 min).  4H bias.
+      • 15  — every cycle (60 s).  PRIMARY structural timeframe for crypto sweep + momentum.
+      • 5   — every cycle (60 s).  5m entry zone detection.
+      • 60  — every cycle (60 s).  H1 retained for chart display and SL calculation.
+      • 1   — every 10 cycles.     Fine-grain chart display.
 
     Rate limiting: CANDLE_DELAY_S = 0.12 s between each kline request → ≤ 8 req/s.
-    Normal cycle (240 + H1 + M5 only): 19 × 3 = 57 req → 57 × 0.12 ≈ 6.8 s per cycle.
+    Normal cycle (240 + 15 + 5 + 60): 19 × 4 = 76 req → 76 × 0.12 ≈ 9.1 s per cycle.
     """
     FETCH_TIMEOUT  = 20.0
     MAX_BACKOFF    = 60.0
@@ -136,15 +136,14 @@ async def bybit_refresh_loop() -> None:
                 if backoff:
                     await asyncio.sleep(backoff)
 
-                # Build the fetch list for this cycle
-                # H1 ("60") and M5 ("5") are always fetched — they drive analysis.
-                # 4H ("240") only refreshed every HTF_REFRESH_CYCLES cycles.
-                # M15 ("15") every 5th cycle, M1 ("1") every 10th.
-                intervals_this_cycle: list[str] = ["60", "5"]
+                # Build the fetch list for this cycle.
+                # CryptoSMCEngine uses 15m as the structural timeframe, so
+                # "15" is now fetched every cycle (same cadence as "5").
+                # "60" (H1) is still fetched every cycle for chart display
+                # and for SL calculation in candle_anchor_levels().
+                intervals_this_cycle: list[str] = ["15", "5", "60"]
                 if cycle % HTF_REFRESH_CYCLES == 0:
                     intervals_this_cycle.insert(0, "240")
-                if cycle % 5  == 0:
-                    intervals_this_cycle.append("15")
                 if cycle % 10 == 0:
                     intervals_this_cycle.append("1")
 
@@ -157,25 +156,28 @@ async def bybit_refresh_loop() -> None:
 
                 # ── SMC analysis (full 4-stage MTF) ──────────────────────────
                 try:
-                    candles_4h = state.bybit_candle_cache[sym].get("240", [])
-                    candles_h1 = state.bybit_candle_cache[sym].get("60",  [])
-                    candles_m5 = state.bybit_candle_cache[sym].get("5",   [])
-                    price      = state.bybit_prices.get(sym)
+                    candles_4h  = state.bybit_candle_cache[sym].get("240", [])
+                    candles_15m = state.bybit_candle_cache[sym].get("15",  [])
+                    candles_m5  = state.bybit_candle_cache[sym].get("5",   [])
+                    price       = state.bybit_prices.get(sym)
 
-                    # Minimum data gates
-                    # 4H bias needs 210 bars for EMA-200; gate at 200 so first
-                    # full fetch (250 bars) is always sufficient.
+                    # Minimum data gates:
+                    #   4H  — 200 bars for EMA-200 bias
+                    #   15m — 100 bars (≈25h) for sweep + momentum detection
+                    #   5m  —  20 bars for entry zone detection
                     if (not price
-                            or len(candles_4h) < 200
-                            or len(candles_h1) < 60
-                            or len(candles_m5) < 20):
+                            or len(candles_4h)  < 200
+                            or len(candles_15m) < 100
+                            or len(candles_m5)  < 20):
                         continue
 
                     if trade_tracker.is_locked(sym):
                         continue
 
+                    # Pass candles_15m as the second (structural) argument.
+                    # CryptoSMCEngine expects: (4H, 15m, 5m, price, ts)
                     signal: Optional[TradeSignal] = state.bybit_engines[sym].analyze(
-                        candles_4h, candles_h1, candles_m5,
+                        candles_4h, candles_15m, candles_m5,
                         price, int(time.time()),
                     )
 

@@ -72,9 +72,12 @@ async def bybit_market(_: dict = Depends(get_current_user)):
     for sym in BYBIT_SYMBOLS:
         price = state.bybit_prices.get(sym, 0.0)
         h1        = state.bybit_candle_cache[sym]["60"]
-        candles_4h = state.bybit_candle_cache[sym].get("240", [])
-        meta      = state.bybit_meta.get(sym, {})
-        smc       = state.bybit_engines[sym].get_partial_state(candles_4h, h1, price) if (price and len(h1) >= 60) else None
+        candles_4h  = state.bybit_candle_cache[sym].get("240", [])
+        candles_15m = state.bybit_candle_cache[sym].get("15",  [])
+        meta        = state.bybit_meta.get(sym, {})
+        # CryptoSMCEngine structural timeframe is 15m — pass candles_15m
+        # as the second positional argument (same slot as candles_h1 in Forex).
+        smc = state.bybit_engines[sym].get_partial_state(candles_4h, candles_15m, price)               if (price and len(candles_15m) >= 60) else None
         result.append({
             "symbol": sym, "price": price,
             "confidence":  smc.confidence        if smc else 0,
@@ -84,7 +87,7 @@ async def bybit_market(_: dict = Depends(get_current_user)):
             "pd_zone":     smc.pd_zone           if smc else None,
             "pd_aligned":  smc.pd_aligned        if smc else False,
             # candle counts help the UI distinguish "loading" from "no signal"
-            "h1_bars":     len(h1),
+            "h1_bars":     len(candles_15m),
             "d_bars":      len(candles_4h),
             "high24h":     meta.get("high24h",   0.0),
             "low24h":      meta.get("low24h",    0.0),

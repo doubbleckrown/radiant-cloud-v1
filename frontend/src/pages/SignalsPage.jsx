@@ -61,8 +61,9 @@ function fmtAgo(ts) {
   if (s < 3600) return `${Math.floor(s / 60)}m ago`;
   return `${Math.floor(s / 3600)}h ago`;
 }
-// ── SMC v3 layer2 string parsers ─────────────────────────────────────────────
-// layer2 format: "Swept Swing Low @ 1.08234 → MSS 1.08456 → M5 OB [1.08200–1.08234]"
+// ── Layer2 string parsers — handles both Forex and Crypto formats ─────────────
+// Forex:  "Swept Swing Low @ 1.08234 → MSS 1.08456 → M5 OB [1.08200–1.08234]"
+// Crypto: "Swept EQL @ 49670.1513 → MOM 49800.0000 → 5m FVG [49650.0000–49700.0000]"
 function parseSweepType(layer2) {
   if (!layer2) return null;
   const m = String(layer2).match(/Swept (.+?) @/);
@@ -71,13 +72,17 @@ function parseSweepType(layer2) {
 function parseMSSLevel(layer2) {
   if (!layer2) return null;
   const parts = String(layer2).split(" → ");
-  const mssPart = parts.find(p => p.trim().startsWith("MSS"));
-  return mssPart ? mssPart.trim() : null;
+  // Matches "MSS x.xxxx" (Forex CHoCH) or "MOM x.xxxx" (Crypto momentum)
+  const part = parts.find(p => p.trim().startsWith("MSS") || p.trim().startsWith("MOM"));
+  return part ? part.trim() : null;
 }
 function parseZoneType(layer2) {
   if (!layer2) return null;
   const parts = String(layer2).split(" → ");
-  const zonePart = parts.find(p => p.includes("M5 OB") || p.includes("M5 FVG")) ?? "";
+  // Matches both "M5 OB/FVG" (Forex) and "5m OB/FVG" (Crypto)
+  const zonePart = parts.find(p =>
+    p.includes("OB") || p.includes("FVG")
+  ) ?? "";
   if (zonePart.includes("OB"))  return "OB";
   if (zonePart.includes("FVG")) return "FVG";
   return null;
@@ -86,6 +91,11 @@ function parseZoneRange(layer2) {
   if (!layer2) return null;
   const m = String(layer2).match(/\[(.+?)\]/);
   return m ? m[1] : null;
+}
+// True if the layer2 string is from the crypto engine (uses MOM + 5m prefix)
+function isCryptoLayer2(layer2) {
+  if (!layer2) return false;
+  return String(layer2).includes("MOM") || String(layer2).includes("5m ");
 }
 
 /** Strict dedup key — instrument + direction only (no time bucket). 
@@ -427,7 +437,7 @@ export default function SignalsPage() {
             <p style={{ color: C.sub, fontSize: "0.72rem", margin: 0 }}>
               {activeTab === "Active"
                 ? (isCrypto
-                    ? "4H Bias → H1 Liq. Sweep → MSS → M5 OB/FVG — all 4 stages required."
+                    ? "4H Bias → 15m Liq. Sweep → Momentum → 5m FVG/OB — all 4 stages required."
                     : "Daily Bias → H1 Liq. Sweep → MSS → M5 OB/FVG — all 4 stages required.")
                 : "Past signals will appear here after their 2-hour window expires."}
             </p>
@@ -651,18 +661,22 @@ function SignalCard({ sig, locked, isActive, isCrypto, accent, accentDim, accent
                   value={sig.layer1 ?? null}
                   accent={accent} isLong={isLong}
                 />
-                {/* Stage 2 — H1 Liquidity Sweep */}
+                {/* Stage 2 — Liquidity Sweep (H1 Forex / 15m Crypto) */}
                 <LayerBadge
-                  label="H1 SWEEP"
+                  label={isCrypto ? "15m SWEEP" : "H1 SWEEP"}
                   active={!!sig.layer2}
                   value={parseSweepType(sig.layer2)}
                   accent={accent} isLong={isLong}
                 />
-                {/* Stage 3+4 — H1 MSS + M5 OB/FVG */}
+                {/* Stage 3+4 — Structure Shift + Entry Zone */}
                 <LayerBadge
                   label="MSS+ZONE"
                   active={!!sig.layer3}
-                  value={sig.layer3 ? (parseZoneType(sig.layer2) ? `${parseZoneType(sig.layer2)} · CHoCH` : "CHoCH") : null}
+                  value={sig.layer3
+                    ? (parseZoneType(sig.layer2)
+                        ? `${parseZoneType(sig.layer2)} · ${isCryptoLayer2(sig.layer2) ? "MOM" : "CHoCH"}`
+                        : (isCryptoLayer2(sig.layer2) ? "MOM" : "CHoCH"))
+                    : null}
                   accent={accent} isLong={isLong}
                 />
                 {/* P/D Zone — ICT premium/discount filter */}
@@ -683,12 +697,19 @@ function SignalCard({ sig, locked, isActive, isCrypto, accent, accentDim, accent
                     <AlgoRow icon="💧" label="Sweep" value={`${parseSweepType(sig.layer2)}`} color={isLong ? "#00BFFF" : "#FF6B6B"} />
                   )}
                   {parseMSSLevel(sig.layer2) && (
-                    <AlgoRow icon="⚡" label="Structure Shift" value={parseMSSLevel(sig.layer2)} color="#FFB800" />
+                    <AlgoRow
+                      icon="⚡"
+                      label={isCryptoLayer2(sig.layer2) ? "Momentum" : "Structure Shift"}
+                      value={parseMSSLevel(sig.layer2)}
+                      color="#FFB800"
+                    />
                   )}
                   {parseZoneType(sig.layer2) && (
                     <AlgoRow
-                      icon={parseZoneType(sig.layer2) === "OB" ? "🧱" : "🌊"}
-                      label={`M5 ${parseZoneType(sig.layer2) === "OB" ? "Order Block" : "Fair Value Gap"}`}
+                      icon={parseZoneType(sig.layer2) === "FVG" ? "🌊" : "🧱"}
+                      label={isCryptoLayer2(sig.layer2)
+                        ? `5m ${parseZoneType(sig.layer2) === "FVG" ? "Fair Value Gap" : "Order Block"}`
+                        : `M5 ${parseZoneType(sig.layer2) === "OB"  ? "Order Block"   : "Fair Value Gap"}`}
                       value={parseZoneRange(sig.layer2) ?? ""}
                       color={isLong ? "#00FF41" : "#FF3B3B"}
                     />
@@ -734,7 +755,8 @@ function SignalCard({ sig, locked, isActive, isCrypto, accent, accentDim, accent
 const LAYER_COLORS = {
   "D BIAS":   { active: "#888888", glow: "rgba(136,136,136,0.4)" },
   "4H BIAS":  { active: "#888888", glow: "rgba(136,136,136,0.4)" },  // Bybit HTF
-  "H1 SWEEP": { active: "#00BFFF", glow: "rgba(0,191,255,0.5)"   },
+  "H1 SWEEP":  { active: "#00BFFF", glow: "rgba(0,191,255,0.5)"   },
+  "15m SWEEP": { active: "#00BFFF", glow: "rgba(0,191,255,0.5)"   },
   "MSS+ZONE": { active: "#00FF41", glow: "rgba(0,255,65,0.6)"    },
 };
 
@@ -797,12 +819,12 @@ function LayerBadge({ label, active, value, accent, isLong }) {
   const layerColor = LAYER_COLORS[label];
   const activeColor = label === "MSS+ZONE"
     ? (isLong ? "#00FF00" : "#FF0000")   // MSS+ZONE uses direction color
-    : label === "H1 SWEEP"
+    : (label === "H1 SWEEP" || label === "15m SWEEP")
     ? "#00BFFF"
     : (layerColor?.active ?? accent);
   const glowColor   = label === "MSS+ZONE"
     ? (isLong ? "rgba(0,255,0,0.6)" : "rgba(255,0,0,0.6)")
-    : label === "H1 SWEEP"
+    : (label === "H1 SWEEP" || label === "15m SWEEP")
     ? "rgba(0,191,255,0.5)"
     : (layerColor?.glow ?? "transparent");
   return (
@@ -811,7 +833,7 @@ function LayerBadge({ label, active, value, accent, isLong }) {
       padding: "4px 10px", borderRadius: 8,
       background: active ? `${activeColor}12` : "rgba(255,255,255,0.03)",
       border: `1px solid ${active ? `${activeColor}40` : C.cardBdr}`,
-      filter: active && (label === "MSS+ZONE" || label === "H1 SWEEP") ? `drop-shadow(0 0 4px ${glowColor})` : "none",
+      filter: active && (label === "MSS+ZONE" || label === "H1 SWEEP" || label === "15m SWEEP") ? `drop-shadow(0 0 4px ${glowColor})` : "none",
     }}>
       <div style={{
         width: 6, height: 6, borderRadius: "50%",

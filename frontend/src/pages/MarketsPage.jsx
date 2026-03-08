@@ -345,7 +345,7 @@ export default function MarketsPage() {
               Markets
             </h1>
             <p style={{ color: C.sub, fontSize: "0.62rem", margin: 0, fontFamily: FONT_MONO }}>
-              {liveCount} live · {isCrypto ? "Bybit Linear · SMC/ICT v3" : "Oanda v20 · SMC/ICT v3"}
+              {liveCount} live · {isCrypto ? "Bybit Linear · Crypto SMC" : "Oanda v20 · SMC/ICT v3"}
             </p>
           </div>
         </div>
@@ -630,11 +630,11 @@ export default function MarketsPage() {
 //  Six distinct states — each tells you exactly where the algorithm is:
 //
 //  FULL CONF  (100%, green/red)  — all 4 stages confirmed, signal fired / firing
-//  LIQ SWEPT  ( 67%, cyan)       — daily bias + H1 liquidity sweep confirmed
-//  WRONG ZONE ( 34%, orange)     — daily bias confirmed but price in wrong P/D zone
-//  D BIAS     ( 34%, grey)       — daily bias confirmed, waiting for H1 sweep
-//  D NEUTRAL  (  0%, dim)        — enough bars but daily structure is sideways/unclear
-//  LOADING    (  0%, dimmer)     — candle cache still filling (<60 H1 bars)
+//  LIQ SWEPT  ( 67%, cyan)       — HTF bias + liquidity sweep confirmed (H1 Forex / 15m Crypto)
+//  WRONG ZONE ( 34%, orange)     — HTF bias confirmed but price in wrong zone
+//  D BIAS     ( 34%, grey)       — HTF bias confirmed, waiting for sweep (D Forex / 4H Crypto)
+//  D NEUTRAL  (  0%, dim)        — enough bars but HTF structure is sideways/unclear
+//  LOADING    (  0%, dimmer)     — candle cache still filling (<60 structural bars)
 //
 function ConfBadge({ conf, bias, pdZone, pdAligned, h1Bars, dBars, isCrypto, accent }) {
   const isBullish = bias === "LONG"  || bias === "BULLISH";
@@ -670,20 +670,20 @@ function ConfBadge({ conf, bias, pdZone, pdAligned, h1Bars, dBars, isCrypto, acc
     color   = "#888888";
     glow    = null;
     topLine = biasLabel;
-    subLine = "D BIAS";
+    subLine = isCrypto ? "4H BIAS" : "D BIAS";
   } else if (isNeutral) {
     // Enough bars, but daily HH+HL / LH+LL structure is unclear right now.
     // This is normal — many instruments consolidate for days.
     color   = "rgba(255,255,255,0.22)";
     glow    = null;
     topLine = "D NEUTRAL";
-    subLine = `${dBars}${isCrypto ? "×4H" : "D"} · ${h1Bars}H1`;
+    subLine = `${dBars}${isCrypto ? "×4H" : "D"} · ${h1Bars}${isCrypto ? "×15m" : "H1"}`;
   } else {
     // Still loading bars into the cache
     color   = "rgba(255,255,255,0.14)";
     glow    = null;
     topLine = "LOADING";
-    subLine = h1Bars > 0 ? `${h1Bars}/60 H1` : "awaiting data";
+    subLine = h1Bars > 0 ? `${h1Bars}/60 ${isCrypto ? "15m" : "H1"}` : "awaiting data";
   }
 
   return (
@@ -957,7 +957,7 @@ function InlineChart({ instrument, isCrypto, granularity, setGranularity, accent
       {/* No-signal note — only shown when the chart is open but no signal yet */}
       {!hasSignal && !loading && (
         <p style={{ color: C.sub, fontSize: "0.6rem", textAlign: "center", margin: "8px 0 0", fontFamily: FONT_MONO }}>
-          Awaiting full confluence — D Bias → H1 Sweep → MSS → M5 OB/FVG
+          {isCrypto ? "Awaiting full confluence — 4H Bias → 15m Sweep → Momentum → 5m FVG/OB" : "Awaiting full confluence — D Bias → H1 Sweep → MSS → M5 OB/FVG"}
         </p>
       )}
     </div>
@@ -989,11 +989,19 @@ function SMCPipelineStrip({ analysis, accent }) {
   const isBull = bias === "BULLISH" || bias === "LONG";
   const dirColor = s4 ? (isBull ? "#00FF00" : "#FF0000") : accent;
 
+  // Stage labels differ between Oanda (Forex) and Bybit (Crypto)
+  const isCryptoPipe = analysis?.engine === "BYBIT" ||
+    (analysis?.d_bars != null && analysis?.h1_bars != null &&
+     !analysis?.session_filter_on);   // crypto engines have no session filter
   const stages = [
-    { key: "s1", label: "D Bias",    sublabel: "Daily HTF",  active: s1,  color: "#888888" },
-    { key: "s2", label: "H1 Sweep",  sublabel: "Liq. Hunt",  active: s2,  color: "#00BFFF" },
-    { key: "s3", label: "MSS",       sublabel: "CHoCH/BOS",  active: s3,  color: "#FFB800" },
-    { key: "s4", label: "M5 Zone",   sublabel: "OB / FVG",   active: s4,  color: dirColor  },
+    { key: "s1", label: isCryptoPipe ? "4H Bias"    : "D Bias",
+                 sublabel: isCryptoPipe ? "4H HTF"      : "Daily HTF",   active: s1, color: "#888888" },
+    { key: "s2", label: isCryptoPipe ? "15m Sweep"  : "H1 Sweep",
+                 sublabel: isCryptoPipe ? "EQL/EQH Hunt" : "Liq. Hunt",   active: s2, color: "#00BFFF" },
+    { key: "s3", label: isCryptoPipe ? "Momentum"   : "MSS",
+                 sublabel: isCryptoPipe ? "Cascade/BOS"  : "CHoCH/BOS",   active: s3, color: "#FFB800" },
+    { key: "s4", label: isCryptoPipe ? "5m Zone"    : "M5 Zone",
+                 sublabel: isCryptoPipe ? "FVG / OB"     : "OB / FVG",    active: s4, color: dirColor  },
   ];
 
   return (
